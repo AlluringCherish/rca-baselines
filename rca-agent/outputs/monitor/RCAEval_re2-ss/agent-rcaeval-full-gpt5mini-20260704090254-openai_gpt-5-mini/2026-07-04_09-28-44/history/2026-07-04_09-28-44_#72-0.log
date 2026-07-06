@@ -1,0 +1,1173 @@
+2026-07-04 09:35:30,936 | INFO | ################################################################################
+2026-07-04 09:35:30,936 | INFO | 2026-07-04_09-28-44_#72-0: RCAEval/re2-ss idx=72 rcaeval_re2
+2026-07-04 09:35:30,936 | INFO | ################################################################################
+2026-07-04 09:35:30,936 | INFO | Objective: Diagnose the incident. The incident window is 2024-01-18 21:39:49 to 2024-01-18 22:09:49 UTC. Use the available metrics and logs to identify the root-cause service/component and failure reason.
+2026-07-04 09:35:38,935 | DEBUG | Raw Response:
+{
+    "analysis": "None",
+    "completed": "False",
+    "instruction": "Please run the following data-preprocessing and summarization steps using the CSV files in the current working directory (metric.csv, trace.csv, log.csv, error_logs.csv). Do not calculate thresholds after filtering by the incident window; compute global thresholds from the full available series first. Use UTC for time parsing. Return compact aggregate outputs only (limit results to top 50 rows per table).\n\nSteps to perform:\n1) Load metric.csv, trace.csv, log.csv, and error_logs.csv. Parse the timestamp columns into datetimes with pd.to_datetime(..., unit='s', utc=True').\n2) For metric.csv: for each unique (cmdb_id, kpi_name) pair compute: global_p95 (95th percentile of value using the entire series), total_points (count of all rows for that pair). Then filter metric rows to the incident window 2024-01-18 21:39:49 to 2024-01-18 22:09:49 UTC and compute points_in_window (count), earliest_timestamp_in_window, latest_timestamp_in_window. Produce a table with columns: source='metric', cmdb_id, name=kpi_name, global_p95, total_points, points_in_window, earliest_timestamp_in_window, latest_timestamp_in_window. Limit to top 50 rows ordered by points_in_window desc then total_points desc.\n3) For trace.csv: perform the same aggregation per (cmdb_id, trace_name) and produce analogous table with source='trace' and name=trace_name.\n4) For log.csv: perform the same aggregation per (cmdb_id, log_name) and produce analogous table with source='log' and name=log_name.\n5) For error_logs.csv: produce a compact summary listing unique cmdb_id values and the count of error log rows overall and within the incident window. Return columns: source='error_logs', cmdb_id, total_error_rows, error_rows_in_window, earliest_error_in_window, latest_error_in_window. Limit to top 50 rows.\n6) Additionally, return three small lists: (a) unique cmdb_id values seen across metric/trace/log/error_logs; (b) top 20 metric kpi_name values by total_points (name and total_points); (c) top 20 trace_name/log_name values by total_points.\n\nReturn results as JSON-serializable structures (dataframes converted to lists of dicts or dicts). Ensure outputs are compact and limited to top 50 rows where requested."
+}
+2026-07-04 09:35:38,936 | INFO | --------------------------------------------------------------------------------
+### Step[1]
+Analysis: None
+Instruction: Please run the following data-preprocessing and summarization steps using the CSV files in the current working directory (metric.csv, trace.csv, log.csv, error_logs.csv). Do not calculate thresholds after filtering by the incident window; compute global thresholds from the full available series first. Use UTC for time parsing. Return compact aggregate outputs only (limit results to top 50 rows per table).
+
+Steps to perform:
+1) Load metric.csv, trace.csv, log.csv, and error_logs.csv. Parse the timestamp columns into datetimes with pd.to_datetime(..., unit='s', utc=True').
+2) For metric.csv: for each unique (cmdb_id, kpi_name) pair compute: global_p95 (95th percentile of value using the entire series), total_points (count of all rows for that pair). Then filter metric rows to the incident window 2024-01-18 21:39:49 to 2024-01-18 22:09:49 UTC and compute points_in_window (count), earliest_timestamp_in_window, latest_timestamp_in_window. Produce a table with columns: source='metric', cmdb_id, name=kpi_name, global_p95, total_points, points_in_window, earliest_timestamp_in_window, latest_timestamp_in_window. Limit to top 50 rows ordered by points_in_window desc then total_points desc.
+3) For trace.csv: perform the same aggregation per (cmdb_id, trace_name) and produce analogous table with source='trace' and name=trace_name.
+4) For log.csv: perform the same aggregation per (cmdb_id, log_name) and produce analogous table with source='log' and name=log_name.
+5) For error_logs.csv: produce a compact summary listing unique cmdb_id values and the count of error log rows overall and within the incident window. Return columns: source='error_logs', cmdb_id, total_error_rows, error_rows_in_window, earliest_error_in_window, latest_error_in_window. Limit to top 50 rows.
+6) Additionally, return three small lists: (a) unique cmdb_id values seen across metric/trace/log/error_logs; (b) top 20 metric kpi_name values by total_points (name and total_points); (c) top 20 trace_name/log_name values by total_points.
+
+Return results as JSON-serializable structures (dataframes converted to lists of dicts or dicts). Ensure outputs are compact and limited to top 50 rows where requested.
+--------------------------------------------------------------------------------
+2026-07-04 09:35:38,936 | DEBUG | Start execution
+2026-07-04 09:36:02,633 | DEBUG | Raw Code:
+import pandas as pd
+
+# 1) Load CSVs and parse timestamps (UTC)
+metric = pd.read_csv("metric.csv")
+trace = pd.read_csv("trace.csv")
+log = pd.read_csv("log.csv")
+error_logs = pd.read_csv("error_logs.csv")
+
+for df in (metric, trace, log, error_logs):
+    if "timestamp" in df.columns:
+        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="s", utc=True)
+
+# Incident window (UTC)
+incident_start = pd.to_datetime("2024-01-18 21:39:49", utc=True)
+incident_end = pd.to_datetime("2024-01-18 22:09:49", utc=True)
+
+# Helper to build summaries for metric/trace/log
+def build_kpi_summary(df, source_label, id_col, name_col):
+    # global aggregations (use entire series)
+    grp = df.groupby([id_col, name_col])
+    global_p95 = grp["value"].quantile(0.95).rename("global_p95")
+    total_points = grp.size().rename("total_points")
+    summary = pd.concat([global_p95, total_points], axis=1).reset_index()
+
+    # window filtering and windowed aggregations
+    df_win = df[(df["timestamp"] >= incident_start) & (df["timestamp"] <= incident_end)]
+    grp_win = df_win.groupby([id_col, name_col])
+    points_in_window = grp_win.size().rename("points_in_window").reset_index()
+    earliest_in_window = grp_win["timestamp"].min().rename("earliest_timestamp_in_window").reset_index()
+    latest_in_window = grp_win["timestamp"].max().rename("latest_timestamp_in_window").reset_index()
+
+    # merge windowed stats into summary
+    summary = summary.merge(points_in_window, how="left", on=[id_col, name_col])
+    summary = summary.merge(earliest_in_window, how="left", on=[id_col, name_col])
+    summary = summary.merge(latest_in_window, how="left", on=[id_col, name_col])
+
+    # fill NA for groups with no window rows
+    summary["points_in_window"] = summary["points_in_window"].fillna(0).astype(int)
+    # convert timestamps to ISO strings for JSON-serializable output, keep None if NaT
+    def to_iso(x):
+        if pd.isna(x):
+            return None
+        return pd.to_datetime(x).isoformat()
+    summary["earliest_timestamp_in_window"] = summary["earliest_timestamp_in_window"].apply(to_iso)
+    summary["latest_timestamp_in_window"] = summary["latest_timestamp_in_window"].apply(to_iso)
+
+    # prepare final columns
+    summary = summary.rename(columns={id_col: "cmdb_id", name_col: "name"})
+    summary.insert(0, "source", source_label)
+
+    # order and limit top 50 by points_in_window desc then total_points desc
+    summary = summary.sort_values(by=["points_in_window", "total_points"], ascending=[False, False]).head(50)
+
+    return summary
+
+# 2) Metric summary
+metric_summary_df = build_kpi_summary(metric, "metric", "cmdb_id", "kpi_name")
+
+# 3) Trace summary
+trace_summary_df = build_kpi_summary(trace, "trace", "cmdb_id", "trace_name")
+
+# 4) Log summary
+log_summary_df = build_kpi_summary(log, "log", "cmdb_id", "log_name")
+
+# 5) Error logs summary
+# total_error_rows overall
+if not error_logs.empty:
+    err_total = error_logs.groupby("cmdb_id").size().rename("total_error_rows").reset_index()
+else:
+    err_total = pd.DataFrame(columns=["cmdb_id", "total_error_rows"])
+
+# within window
+err_win = error_logs[(error_logs["timestamp"] >= incident_start) & (error_logs["timestamp"] <= incident_end)]
+if not err_win.empty:
+    err_win_count = err_win.groupby("cmdb_id").size().rename("error_rows_in_window").reset_index()
+    err_earliest = err_win.groupby("cmdb_id")["timestamp"].min().rename("earliest_error_in_window").reset_index()
+    err_latest = err_win.groupby("cmdb_id")["timestamp"].max().rename("latest_error_in_window").reset_index()
+else:
+    err_win_count = pd.DataFrame(columns=["cmdb_id", "error_rows_in_window"])
+    err_earliest = pd.DataFrame(columns=["cmdb_id", "earliest_error_in_window"])
+    err_latest = pd.DataFrame(columns=["cmdb_id", "latest_error_in_window"])
+
+err_summary = err_total.merge(err_win_count, how="left", on="cmdb_id")
+err_summary = err_summary.merge(err_earliest, how="left", on="cmdb_id")
+err_summary = err_summary.merge(err_latest, how="left", on="cmdb_id")
+
+err_summary["error_rows_in_window"] = err_summary["error_rows_in_window"].fillna(0).astype(int)
+
+# convert timestamps to ISO strings
+def _to_iso_ts(x):
+    if pd.isna(x):
+        return None
+    return pd.to_datetime(x).isoformat()
+
+if "earliest_error_in_window" in err_summary.columns:
+    err_summary["earliest_error_in_window"] = err_summary["earliest_error_in_window"].apply(_to_iso_ts)
+else:
+    err_summary["earliest_error_in_window"] = None
+if "latest_error_in_window" in err_summary.columns:
+    err_summary["latest_error_in_window"] = err_summary["latest_error_in_window"].apply(_to_iso_ts)
+else:
+    err_summary["latest_error_in_window"] = None
+
+err_summary.insert(0, "source", "error_logs")
+err_summary = err_summary[["source", "cmdb_id", "total_error_rows", "error_rows_in_window", "earliest_error_in_window", "latest_error_in_window"]]
+err_summary = err_summary.sort_values(by=["error_rows_in_window", "total_error_rows"], ascending=[False, False]).head(50)
+
+# 6) Additional small lists:
+# (a) unique cmdb_id across metric/trace/log/error_logs
+cmdbs_metric = set(metric["cmdb_id"].unique()) if not metric.empty else set()
+cmdbs_trace = set(trace["cmdb_id"].unique()) if not trace.empty else set()
+cmdbs_log = set(log["cmdb_id"].unique()) if not log.empty else set()
+cmdbs_err = set(error_logs["cmdb_id"].unique()) if not error_logs.empty else set()
+unique_cmdb_ids = sorted(list(cmdbs_metric | cmdbs_trace | cmdbs_log | cmdbs_err))
+
+# (b) top 20 metric kpi_name values by total_points (aggregate across cmdbs)
+if not metric_summary_df.empty:
+    metric_kpi_agg = metric_summary_df.groupby("name")["total_points"].sum().reset_index().sort_values("total_points", ascending=False).head(20)
+    top20_metric_kpis = metric_kpi_agg.to_dict(orient="records")
+else:
+    top20_metric_kpis = []
+
+# (c) top 20 trace_name/log_name values by total_points
+# combine trace_summary_df and log_summary_df with source tag
+combined_tl = pd.DataFrame(columns=["source", "cmdb_id", "name", "global_p95", "total_points", "points_in_window",
+                                    "earliest_timestamp_in_window", "latest_timestamp_in_window"])
+if not trace_summary_df.empty:
+    combined_tl = pd.concat([combined_tl, trace_summary_df], ignore_index=True, sort=False)
+if not log_summary_df.empty:
+    combined_tl = pd.concat([combined_tl, log_summary_df], ignore_index=True, sort=False)
+
+if not combined_tl.empty:
+    tl_agg = combined_tl.groupby(["source", "name"])["total_points"].sum().reset_index().sort_values("total_points", ascending=False).head(20)
+    top20_trace_log_names = tl_agg.to_dict(orient="records")
+else:
+    top20_trace_log_names = []
+
+# Convert the summary DataFrames to lists of dicts for JSON-serializable output
+metric_summary = metric_summary_df.to_dict(orient="records")
+trace_summary = trace_summary_df.to_dict(orient="records")
+log_summary = log_summary_df.to_dict(orient="records")
+error_logs_summary = err_summary.to_dict(orient="records")
+
+# Final compact result structure
+results = {
+    "metric_summary_top50": metric_summary,
+    "trace_summary_top50": trace_summary,
+    "log_summary_top50": log_summary,
+    "error_logs_summary_top50": error_logs_summary,
+    "unique_cmdb_ids": unique_cmdb_ids,
+    "top20_metric_kpis": top20_metric_kpis,
+    "top20_trace_log_names": top20_trace_log_names
+}
+
+results
+2026-07-04 09:36:03,066 | WARNING | Execution failed. Error message: Traceback (most recent call last):
+  File "/root/.local/lib/python3.10/site-packages/IPython/core/interactiveshell.py", line 3579, in run_code
+    exec(code_obj, self.user_global_ns, self.user_ns)
+  File "<ipython-input-1-1a3d53f220a3>", line 60, in <module>
+    trace_summary_df = build_kpi_summary(trace, "trace", "cmdb_id", "trace_name")
+  File "<ipython-input-1-1a3d53f220a3>", line 21, in build_kpi_summary
+    global_p95 = grp["value"].quantile(0.95).rename("global_p95")
+  File "/root/.local/lib/python3.10/site-packages/pandas/core/groupby/groupby.py", line 4567, in quantile
+    res_mgr = sdata._mgr.grouped_reduce(blk_func)
+  File "/root/.local/lib/python3.10/site-packages/pandas/core/internals/base.py", line 367, in grouped_reduce
+    res = func(arr)
+  File "/root/.local/lib/python3.10/site-packages/pandas/core/groupby/groupby.py", line 4528, in blk_func
+    vals, inference = pre_processor(values)
+  File "/root/.local/lib/python3.10/site-packages/pandas/core/groupby/groupby.py", line 4405, in pre_processor
+    raise TypeError(
+TypeError: dtype 'object' does not support operation 'quantile'
+
+2026-07-04 09:36:03,066 | DEBUG | Execution finished. Time cost: 0:00:24.130131
+2026-07-04 09:36:22,982 | DEBUG | Raw Code:
+import pandas as pd
+
+# 1) Load CSVs and parse timestamps (UTC)
+metric = pd.read_csv("metric.csv")
+trace = pd.read_csv("trace.csv")
+log = pd.read_csv("log.csv")
+error_logs = pd.read_csv("error_logs.csv")
+
+for df in (metric, trace, log, error_logs):
+    if "timestamp" in df.columns:
+        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="s", utc=True)
+
+# Ensure 'value' columns are numeric where present
+for df in (metric, trace, log):
+    if "value" in df.columns:
+        df["value"] = pd.to_numeric(df["value"], errors="coerce")
+
+# Incident window (UTC)
+incident_start = pd.to_datetime("2024-01-18 21:39:49", utc=True)
+incident_end = pd.to_datetime("2024-01-18 22:09:49", utc=True)
+
+# Helper to build summaries for metric/trace/log
+def build_kpi_summary(df, source_label, id_col, name_col):
+    # Prepare empty structure if df is empty or missing required cols
+    cols = ["source", "cmdb_id", "name", "global_p95", "total_points",
+            "points_in_window", "earliest_timestamp_in_window", "latest_timestamp_in_window"]
+    if df.empty or name_col not in df.columns or id_col not in df.columns:
+        return pd.DataFrame(columns=cols)
+
+    # global aggregations (use entire series)
+    # ensure value numeric; quantile will ignore NaN
+    grp = df.groupby([id_col, name_col])
+    try:
+        global_p95 = grp["value"].quantile(0.95).rename("global_p95")
+    except Exception:
+        # if 'value' missing or non-numeric, set NaNs
+        global_p95 = pd.Series(dtype=float, name="global_p95")
+    total_points = grp.size().rename("total_points")
+    summary = pd.concat([global_p95, total_points], axis=1).reset_index()
+
+    # window filtering and windowed aggregations
+    df_win = df[(df["timestamp"] >= incident_start) & (df["timestamp"] <= incident_end)]
+    if not df_win.empty:
+        grp_win = df_win.groupby([id_col, name_col])
+        points_in_window = grp_win.size().rename("points_in_window").reset_index()
+        earliest_in_window = grp_win["timestamp"].min().rename("earliest_timestamp_in_window").reset_index()
+        latest_in_window = grp_win["timestamp"].max().rename("latest_timestamp_in_window").reset_index()
+    else:
+        points_in_window = pd.DataFrame(columns=[id_col, name_col, "points_in_window"])
+        earliest_in_window = pd.DataFrame(columns=[id_col, name_col, "earliest_timestamp_in_window"])
+        latest_in_window = pd.DataFrame(columns=[id_col, name_col, "latest_timestamp_in_window"])
+
+    # merge windowed stats into summary
+    summary = summary.merge(points_in_window, how="left", on=[id_col, name_col])
+    summary = summary.merge(earliest_in_window, how="left", on=[id_col, name_col])
+    summary = summary.merge(latest_in_window, how="left", on=[id_col, name_col])
+
+    # fill NA for groups with no window rows
+    summary["points_in_window"] = summary["points_in_window"].fillna(0).astype(int)
+    # convert timestamps to ISO strings for JSON-serializable output, keep None if NaT
+    def to_iso(x):
+        if pd.isna(x):
+            return None
+        return pd.to_datetime(x).isoformat()
+    summary["earliest_timestamp_in_window"] = summary["earliest_timestamp_in_window"].apply(to_iso)
+    summary["latest_timestamp_in_window"] = summary["latest_timestamp_in_window"].apply(to_iso)
+
+    # prepare final columns
+    summary = summary.rename(columns={id_col: "cmdb_id", name_col: "name"})
+    summary.insert(0, "source", source_label)
+
+    # order and limit top 50 by points_in_window desc then total_points desc
+    summary = summary.sort_values(by=["points_in_window", "total_points"], ascending=[False, False]).head(50)
+
+    # ensure column order
+    summary = summary[cols]
+    return summary
+
+# 2) Metric summary
+metric_summary_df = build_kpi_summary(metric, "metric", "cmdb_id", "kpi_name")
+
+# 3) Trace summary
+trace_summary_df = build_kpi_summary(trace, "trace", "cmdb_id", "trace_name")
+
+# 4) Log summary
+log_summary_df = build_kpi_summary(log, "log", "cmdb_id", "log_name")
+
+# 5) Error logs summary
+# total_error_rows overall
+if not error_logs.empty and "cmdb_id" in error_logs.columns:
+    err_total = error_logs.groupby("cmdb_id").size().rename("total_error_rows").reset_index()
+else:
+    err_total = pd.DataFrame(columns=["cmdb_id", "total_error_rows"])
+
+# within window
+if not error_logs.empty:
+    err_win = error_logs[(error_logs["timestamp"] >= incident_start) & (error_logs["timestamp"] <= incident_end)]
+else:
+    err_win = pd.DataFrame(columns=error_logs.columns)
+
+if not err_win.empty:
+    err_win_count = err_win.groupby("cmdb_id").size().rename("error_rows_in_window").reset_index()
+    err_earliest = err_win.groupby("cmdb_id")["timestamp"].min().rename("earliest_error_in_window").reset_index()
+    err_latest = err_win.groupby("cmdb_id")["timestamp"].max().rename("latest_error_in_window").reset_index()
+else:
+    err_win_count = pd.DataFrame(columns=["cmdb_id", "error_rows_in_window"])
+    err_earliest = pd.DataFrame(columns=["cmdb_id", "earliest_error_in_window"])
+    err_latest = pd.DataFrame(columns=["cmdb_id", "latest_error_in_window"])
+
+err_summary = err_total.merge(err_win_count, how="left", on="cmdb_id")
+err_summary = err_summary.merge(err_earliest, how="left", on="cmdb_id")
+err_summary = err_summary.merge(err_latest, how="left", on="cmdb_id")
+
+if "error_rows_in_window" in err_summary.columns:
+    err_summary["error_rows_in_window"] = err_summary["error_rows_in_window"].fillna(0).astype(int)
+else:
+    err_summary["error_rows_in_window"] = 0
+
+# convert timestamps to ISO strings
+def _to_iso_ts(x):
+    if pd.isna(x):
+        return None
+    return pd.to_datetime(x).isoformat()
+
+if "earliest_error_in_window" in err_summary.columns:
+    err_summary["earliest_error_in_window"] = err_summary["earliest_error_in_window"].apply(_to_iso_ts)
+else:
+    err_summary["earliest_error_in_window"] = None
+if "latest_error_in_window" in err_summary.columns:
+    err_summary["latest_error_in_window"] = err_summary["latest_error_in_window"].apply(_to_iso_ts)
+else:
+    err_summary["latest_error_in_window"] = None
+
+err_summary.insert(0, "source", "error_logs")
+err_summary = err_summary[["source", "cmdb_id", "total_error_rows", "error_rows_in_window", "earliest_error_in_window", "latest_error_in_window"]]
+err_summary = err_summary.sort_values(by=["error_rows_in_window", "total_error_rows"], ascending=[False, False]).head(50)
+
+# 6) Additional small lists:
+# (a) unique cmdb_id across metric/trace/log/error_logs
+cmdbs_metric = set(metric["cmdb_id"].unique()) if not metric.empty else set()
+cmdbs_trace = set(trace["cmdb_id"].unique()) if not trace.empty else set()
+cmdbs_log = set(log["cmdb_id"].unique()) if not log.empty else set()
+cmdbs_err = set(error_logs["cmdb_id"].unique()) if not error_logs.empty else set()
+unique_cmdb_ids = sorted(list(cmdbs_metric | cmdbs_trace | cmdbs_log | cmdbs_err))
+
+# (b) top 20 metric kpi_name values by total_points (aggregate across cmdbs)
+if not metric_summary_df.empty:
+    metric_kpi_agg = metric_summary_df.groupby("name", as_index=False)["total_points"].sum().sort_values("total_points", ascending=False).head(20)
+    top20_metric_kpis = metric_kpi_agg.to_dict(orient="records")
+else:
+    top20_metric_kpis = []
+
+# (c) top 20 trace_name/log_name values by total_points (combined)
+combined_tl = pd.DataFrame(columns=metric_summary_df.columns)  # reuse column structure
+if not trace_summary_df.empty:
+    combined_tl = pd.concat([combined_tl, trace_summary_df], ignore_index=True, sort=False)
+if not log_summary_df.empty:
+    combined_tl = pd.concat([combined_tl, log_summary_df], ignore_index=True, sort=False)
+
+if not combined_tl.empty:
+    tl_agg = combined_tl.groupby(["source", "name"], as_index=False)["total_points"].sum().sort_values("total_points", ascending=False).head(20)
+    top20_trace_log_names = tl_agg.to_dict(orient="records")
+else:
+    top20_trace_log_names = []
+
+# Convert the summary DataFrames to lists of dicts for JSON-serializable output
+metric_summary = metric_summary_df.to_dict(orient="records")
+trace_summary = trace_summary_df.to_dict(orient="records")
+log_summary = log_summary_df.to_dict(orient="records")
+error_logs_summary = err_summary.to_dict(orient="records")
+
+# Final compact result structure
+results = {
+    "metric_summary_top50": metric_summary,
+    "trace_summary_top50": trace_summary,
+    "log_summary_top50": log_summary,
+    "error_logs_summary_top50": error_logs_summary,
+    "unique_cmdb_ids": unique_cmdb_ids,
+    "top20_metric_kpis": top20_metric_kpis,
+    "top20_trace_log_names": top20_trace_log_names
+}
+
+results
+2026-07-04 09:36:23,067 | DEBUG | Execution Result:
+{'metric_summary_top50': [{'source': 'metric', 'cmdb_id': 'carts', 'name': 'cpu', 'global_p95': 1.5668182586918669, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'metric', 'cmdb_id': 'carts', 'name': 'error', 'global_p95': 0.0, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'metric', 'cmdb_id': 'carts', 'name': 'mem', 'global_p95': 216931942.4, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'metric', 'cmdb_id': 'carts', 'name': 'socket', 'global_p95': 19.76, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'metric', 'cmdb_id': 'carts', 'name': 'workload', 'global_p95': 8.535414666666666, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'metric', 'cmdb_id': 'carts-db', 'name': 'cpu', 'global_p95': 14.770506924523485, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'metric', 'cmdb_id': 'carts-db', 'name': 'diskio', 'global_p95': 2707912.923318004, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'metric', 'cmdb_id': 'carts-db', 'name': 'mem', 'global_p95': 139980854.6133333, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'metric', 'cmdb_id': 'carts-db', 'name': 'socket', 'global_p95': 12.0, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'metric', 'cmdb_id': 'catalogue', 'name': 'cpu', 'global_p95': 0.1802260600023756, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'metric', 'cmdb_id': 'catalogue', 'name': 'error', 'global_p95': 0.0, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'metric', 'cmdb_id': 'catalogue', 'name': 'mem', 'global_p95': 6351612.586666666, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'metric', 'cmdb_id': 'catalogue', 'name': 'socket', 'global_p95': 7.0, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'metric', 'cmdb_id': 'catalogue', 'name': 'workload', 'global_p95': 4.198090666666667, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'metric', 'cmdb_id': 'catalogue-db', 'name': 'cpu', 'global_p95': 0.21823335731964083, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'metric', 'cmdb_id': 'catalogue-db', 'name': 'diskio', 'global_p95': 0.0, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'metric', 'cmdb_id': 'catalogue-db', 'name': 'mem', 'global_p95': 432455953.06666666, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'metric', 'cmdb_id': 'catalogue-db', 'name': 'socket', 'global_p95': 4.0, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'metric', 'cmdb_id': 'front-end', 'name': 'error', 'global_p95': 0.0, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'metric', 'cmdb_id': 'front-end', 'name': 'mem', 'global_p95': 104664855.89333335, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'metric', 'cmdb_id': 'front-end', 'name': 'socket', 'global_p95': 13.169999999999996, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'metric', 'cmdb_id': 'front-end', 'name': 'workload', 'global_p95': 24.87912333333333, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'metric', 'cmdb_id': 'orders', 'name': 'cpu', 'global_p95': 1.0805493008892646, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'metric', 'cmdb_id': 'orders', 'name': 'error', 'global_p95': 0.0, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'metric', 'cmdb_id': 'orders', 'name': 'mem', 'global_p95': 331439513.59999996, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'metric', 'cmdb_id': 'orders', 'name': 'socket', 'global_p95': 17.98, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'metric', 'cmdb_id': 'orders', 'name': 'workload', 'global_p95': 2.1485800000000004, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'metric', 'cmdb_id': 'orders-db', 'name': 'cpu', 'global_p95': 0.40996627633144944, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'metric', 'cmdb_id': 'orders-db', 'name': 'diskio', 'global_p95': 907698.496796452, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'metric', 'cmdb_id': 'orders-db', 'name': 'mem', 'global_p95': 71451252.05333333, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'metric', 'cmdb_id': 'orders-db', 'name': 'socket', 'global_p95': 5.0, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'metric', 'cmdb_id': 'payment', 'name': 'cpu', 'global_p95': 0.08486105011490404, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'metric', 'cmdb_id': 'payment', 'name': 'error', 'global_p95': 0.0, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'metric', 'cmdb_id': 'payment', 'name': 'mem', 'global_p95': 4480314.026666666, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'metric', 'cmdb_id': 'payment', 'name': 'socket', 'global_p95': 5.0, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'metric', 'cmdb_id': 'payment', 'name': 'workload', 'global_p95': 2.133586, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'metric', 'cmdb_id': 'queue-master', 'name': 'cpu', 'global_p95': 0.3097121080205096, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'metric', 'cmdb_id': 'queue-master', 'name': 'diskio', 'global_p95': 40468.233525909905, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'metric', 'cmdb_id': 'queue-master', 'name': 'mem', 'global_p95': 267868984.66133332, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'metric', 'cmdb_id': 'queue-master', 'name': 'socket', 'global_p95': 3.0, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'metric', 'cmdb_id': 'rabbitmq', 'name': 'cpu', 'global_p95': 0.8323687363650059, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'metric', 'cmdb_id': 'rabbitmq', 'name': 'diskio', 'global_p95': 0.0, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'metric', 'cmdb_id': 'rabbitmq', 'name': 'mem', 'global_p95': 98456499.54133333, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'metric', 'cmdb_id': 'rabbitmq', 'name': 'socket', 'global_p95': 11.0, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'metric', 'cmdb_id': 'rabbitmq-exporter', 'name': 'cpu', 'global_p95': 0.00016357387119423996, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'metric', 'cmdb_id': 'rabbitmq-exporter', 'name': 'mem', 'global_p95': 4575232.0, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'metric', 'cmdb_id': 'rabbitmq-exporter', 'name': 'socket', 'global_p95': 1.0, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'metric', 'cmdb_id': 'session-db', 'name': 'cpu', 'global_p95': 0.2710064014845593, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'metric', 'cmdb_id': 'session-db', 'name': 'diskio', 'global_p95': 16742.14996718022, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'metric', 'cmdb_id': 'session-db', 'name': 'mem', 'global_p95': 3017823.5733333332, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}], 'trace_summary_top50': [], 'log_summary_top50': [{'source': 'log', 'cmdb_id': 'carts-db', 'name': 'log.error_count', 'global_p95': 0.0, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'log', 'cmdb_id': 'carts-db', 'name': 'log.row_count', 'global_p95': 45.0, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'log', 'cmdb_id': 'catalogue', 'name': 'log.error_count', 'global_p95': 0.0, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'log', 'cmdb_id': 'catalogue', 'name': 'log.row_count', 'global_p95': 166.0, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'log', 'cmdb_id': 'payment', 'name': 'log.error_count', 'global_p95': 0.0, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'log', 'cmdb_id': 'payment', 'name': 'log.row_count', 'global_p95': 105.8, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'log', 'cmdb_id': 'user', 'name': 'log.error_count', 'global_p95': 0.0, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'log', 'cmdb_id': 'user', 'name': 'log.row_count', 'global_p95': 618.8, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'log', 'cmdb_id': 'front-end', 'name': 'log.error_count', 'global_p95': 0.0, 'total_points': 23, 'points_in_window': 23, 'earliest_timestamp_in_window': '2024-01-18T21:44:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'log', 'cmdb_id': 'front-end', 'name': 'log.row_count', 'global_p95': 2008.7, 'total_points': 23, 'points_in_window': 23, 'earliest_timestamp_in_window': '2024-01-18T21:44:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'log', 'cmdb_id': 'carts', 'name': 'log.error_count', 'global_p95': 0.0, 'total_points': 22, 'points_in_window': 22, 'earliest_timestamp_in_window': '2024-01-18T21:45:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'log', 'cmdb_id': 'carts', 'name': 'log.row_count', 'global_p95': 125.0, 'total_points': 22, 'points_in_window': 22, 'earliest_timestamp_in_window': '2024-01-18T21:45:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'log', 'cmdb_id': 'orders', 'name': 'log.error_count', 'global_p95': 0.0, 'total_points': 22, 'points_in_window': 22, 'earliest_timestamp_in_window': '2024-01-18T21:45:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'log', 'cmdb_id': 'orders', 'name': 'log.row_count', 'global_p95': 131.9, 'total_points': 22, 'points_in_window': 22, 'earliest_timestamp_in_window': '2024-01-18T21:45:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'log', 'cmdb_id': 'queue-master', 'name': 'log.error_count', 'global_p95': 0.0, 'total_points': 22, 'points_in_window': 22, 'earliest_timestamp_in_window': '2024-01-18T21:45:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'log', 'cmdb_id': 'queue-master', 'name': 'log.row_count', 'global_p95': 593.55, 'total_points': 22, 'points_in_window': 22, 'earliest_timestamp_in_window': '2024-01-18T21:45:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'log', 'cmdb_id': 'shipping', 'name': 'log.error_count', 'global_p95': 0.0, 'total_points': 22, 'points_in_window': 22, 'earliest_timestamp_in_window': '2024-01-18T21:45:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'log', 'cmdb_id': 'shipping', 'name': 'log.row_count', 'global_p95': 65.95, 'total_points': 22, 'points_in_window': 22, 'earliest_timestamp_in_window': '2024-01-18T21:45:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'log', 'cmdb_id': 'session-db', 'name': 'log.error_count', 'global_p95': 0.0, 'total_points': 5, 'points_in_window': 5, 'earliest_timestamp_in_window': '2024-01-18T21:45:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:05:00+00:00'}, {'source': 'log', 'cmdb_id': 'session-db', 'name': 'log.row_count', 'global_p95': 5.0, 'total_points': 5, 'points_in_window': 5, 'earliest_timestamp_in_window': '2024-01-18T21:45:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:05:00+00:00'}, {'source': 'log', 'cmdb_id': 'user-db', 'name': 'log.error_count', 'global_p95': 0.0, 'total_points': 1, 'points_in_window': 1, 'earliest_timestamp_in_window': '2024-01-18T22:04:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:04:00+00:00'}, {'source': 'log', 'cmdb_id': 'user-db', 'name': 'log.row_count', 'global_p95': 3.0, 'total_points': 1, 'points_in_window': 1, 'earliest_timestamp_in_window': '2024-01-18T22:04:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:04:00+00:00'}], 'error_logs_summary_top50': [], 'unique_cmdb_ids': ['carts', 'carts-db', 'catalogue', 'catalogue-db', 'front-end', 'orders', 'orders-db', 'payment', 'queue-master', 'rabbitmq', 'rabbitmq-exporter', 'session-db', 'shipping', 'user', 'user-db'], 'top20_metric_kpis': [{'name': 'mem', 'total_points': 300}, {'name': 'cpu', 'total_points': 275}, {'name': 'socket', 'total_points': 275}, {'name': 'diskio', 'total_points': 150}, {'name': 'error', 'total_points': 125}, {'name': 'workload', 'total_points': 125}], 'top20_trace_log_names': [{'source': 'log', 'name': 'log.error_count', 'total_points': 217}, {'source': 'log', 'name': 'log.row_count', 'total_points': 217}]}
+2026-07-04 09:36:23,067 | DEBUG | Execution finished. Time cost: 0:00:44.131018
+2026-07-04 09:36:32,694 | DEBUG | Brief Answer:
+Summary of the preprocessing results (incident window 2024-01-18 21:39:49 → 2024-01-18 22:09:49 UTC):
+
+- Data coverage
+  - metric data: many (cmdb_id, kpi) series are present and have full coverage in the window (commonly 25 points each, earliest ~2024-01-18T21:42:00Z to latest ~2024-01-18T22:06:00Z).
+  - trace data: no trace series returned (trace_summary empty).
+  - log data: log series present for many services; most have full or near-full coverage in the window (counts vary, e.g., 25, 23, 22, 5, 1).
+  - error_logs: no error_log rows were found in the summarized output (error_logs_summary empty).
+
+- Top KPIs by sample count (metrics aggregated across services)
+  - mem: 300 points
+  - cpu: 275 points
+  - socket: 275 points
+  - diskio: 150 points
+  - error: 125 points
+  - workload: 125 points
+
+- Top log feature names by total points
+  - log.error_count: 217 points
+  - log.row_count: 217 points
+
+- Notable per-service observations (examples from summaries)
+  - carts, carts-db, catalogue, catalogue-db, front-end, orders, orders-db, payment, queue-master, rabbitmq, rabbitmq-exporter, session-db — all have metric series with 25 points in the window for several KPIs.
+  - front-end logs have 23 points in-window (earliest 2024-01-18T21:44:00Z).
+  - session-db logs have only 5 points in-window (21:45→22:05).
+  - user-db logs have a single point in-window (2024-01-18T22:04:00Z).
+
+- Unique components seen across all telemetry: ['carts', 'carts-db', 'catalogue', 'catalogue-db', 'front-end', 'orders', 'orders-db', 'payment', 'queue-master', 'rabbitmq', 'rabbitmq-exporter', 'session-db', 'shipping', 'user', 'user-db'].
+
+Overall: metrics and logs provide good coverage across the sock-shop services for the incident window; no trace telemetry and no error_log entries were found in the summarized outputs. The most-sampled KPIs are memory, CPU and socket metrics, and the two main log features are log.error_count and log.row_count.
+2026-07-04 09:36:32,695 | INFO | --------------------------------------------------------------------------------
+Step[1]
+### Observation:
+Summary of the preprocessing results (incident window 2024-01-18 21:39:49 → 2024-01-18 22:09:49 UTC):
+
+- Data coverage
+  - metric data: many (cmdb_id, kpi) series are present and have full coverage in the window (commonly 25 points each, earliest ~2024-01-18T21:42:00Z to latest ~2024-01-18T22:06:00Z).
+  - trace data: no trace series returned (trace_summary empty).
+  - log data: log series present for many services; most have full or near-full coverage in the window (counts vary, e.g., 25, 23, 22, 5, 1).
+  - error_logs: no error_log rows were found in the summarized output (error_logs_summary empty).
+
+- Top KPIs by sample count (metrics aggregated across services)
+  - mem: 300 points
+  - cpu: 275 points
+  - socket: 275 points
+  - diskio: 150 points
+  - error: 125 points
+  - workload: 125 points
+
+- Top log feature names by total points
+  - log.error_count: 217 points
+  - log.row_count: 217 points
+
+- Notable per-service observations (examples from summaries)
+  - carts, carts-db, catalogue, catalogue-db, front-end, orders, orders-db, payment, queue-master, rabbitmq, rabbitmq-exporter, session-db — all have metric series with 25 points in the window for several KPIs.
+  - front-end logs have 23 points in-window (earliest 2024-01-18T21:44:00Z).
+  - session-db logs have only 5 points in-window (21:45→22:05).
+  - user-db logs have a single point in-window (2024-01-18T22:04:00Z).
+
+- Unique components seen across all telemetry: ['carts', 'carts-db', 'catalogue', 'catalogue-db', 'front-end', 'orders', 'orders-db', 'payment', 'queue-master', 'rabbitmq', 'rabbitmq-exporter', 'session-db', 'shipping', 'user', 'user-db'].
+
+Overall: metrics and logs provide good coverage across the sock-shop services for the incident window; no trace telemetry and no error_log entries were found in the summarized outputs. The most-sampled KPIs are memory, CPU and socket metrics, and the two main log features are log.error_count and log.row_count.
+
+The original code execution output of IPython Kernel is also provided below for reference:
+
+{'metric_summary_top50': [{'source': 'metric', 'cmdb_id': 'carts', 'name': 'cpu', 'global_p95': 1.5668182586918669, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'metric', 'cmdb_id': 'carts', 'name': 'error', 'global_p95': 0.0, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'metric', 'cmdb_id': 'carts', 'name': 'mem', 'global_p95': 216931942.4, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'metric', 'cmdb_id': 'carts', 'name': 'socket', 'global_p95': 19.76, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'metric', 'cmdb_id': 'carts', 'name': 'workload', 'global_p95': 8.535414666666666, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'metric', 'cmdb_id': 'carts-db', 'name': 'cpu', 'global_p95': 14.770506924523485, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'metric', 'cmdb_id': 'carts-db', 'name': 'diskio', 'global_p95': 2707912.923318004, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'metric', 'cmdb_id': 'carts-db', 'name': 'mem', 'global_p95': 139980854.6133333, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'metric', 'cmdb_id': 'carts-db', 'name': 'socket', 'global_p95': 12.0, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'metric', 'cmdb_id': 'catalogue', 'name': 'cpu', 'global_p95': 0.1802260600023756, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'metric', 'cmdb_id': 'catalogue', 'name': 'error', 'global_p95': 0.0, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'metric', 'cmdb_id': 'catalogue', 'name': 'mem', 'global_p95': 6351612.586666666, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'metric', 'cmdb_id': 'catalogue', 'name': 'socket', 'global_p95': 7.0, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'metric', 'cmdb_id': 'catalogue', 'name': 'workload', 'global_p95': 4.198090666666667, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'metric', 'cmdb_id': 'catalogue-db', 'name': 'cpu', 'global_p95': 0.21823335731964083, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'metric', 'cmdb_id': 'catalogue-db', 'name': 'diskio', 'global_p95': 0.0, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'metric', 'cmdb_id': 'catalogue-db', 'name': 'mem', 'global_p95': 432455953.06666666, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'metric', 'cmdb_id': 'catalogue-db', 'name': 'socket', 'global_p95': 4.0, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'metric', 'cmdb_id': 'front-end', 'name': 'error', 'global_p95': 0.0, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'metric', 'cmdb_id': 'front-end', 'name': 'mem', 'global_p95': 104664855.89333335, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'metric', 'cmdb_id': 'front-end', 'name': 'socket', 'global_p95': 13.169999999999996, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'metric', 'cmdb_id': 'front-end', 'name': 'workload', 'global_p95': 24.87912333333333, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'metric', 'cmdb_id': 'orders', 'name': 'cpu', 'global_p95': 1.0805493008892646, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'metric', 'cmdb_id': 'orders', 'name': 'error', 'global_p95': 0.0, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'metric', 'cmdb_id': 'orders', 'name': 'mem', 'global_p95': 331439513.59999996, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'metric', 'cmdb_id': 'orders', 'name': 'socket', 'global_p95': 17.98, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'metric', 'cmdb_id': 'orders', 'name': 'workload', 'global_p95': 2.1485800000000004, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'metric', 'cmdb_id': 'orders-db', 'name': 'cpu', 'global_p95': 0.40996627633144944, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'metric', 'cmdb_id': 'orders-db', 'name': 'diskio', 'global_p95': 907698.496796452, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'metric', 'cmdb_id': 'orders-db', 'name': 'mem', 'global_p95': 71451252.05333333, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'metric', 'cmdb_id': 'orders-db', 'name': 'socket', 'global_p95': 5.0, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'metric', 'cmdb_id': 'payment', 'name': 'cpu', 'global_p95': 0.08486105011490404, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'metric', 'cmdb_id': 'payment', 'name': 'error', 'global_p95': 0.0, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'metric', 'cmdb_id': 'payment', 'name': 'mem', 'global_p95': 4480314.026666666, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'metric', 'cmdb_id': 'payment', 'name': 'socket', 'global_p95': 5.0, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'metric', 'cmdb_id': 'payment', 'name': 'workload', 'global_p95': 2.133586, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'metric', 'cmdb_id': 'queue-master', 'name': 'cpu', 'global_p95': 0.3097121080205096, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'metric', 'cmdb_id': 'queue-master', 'name': 'diskio', 'global_p95': 40468.233525909905, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'metric', 'cmdb_id': 'queue-master', 'name': 'mem', 'global_p95': 267868984.66133332, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'metric', 'cmdb_id': 'queue-master', 'name': 'socket', 'global_p95': 3.0, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'metric', 'cmdb_id': 'rabbitmq', 'name': 'cpu', 'global_p95': 0.8323687363650059, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'metric', 'cmdb_id': 'rabbitmq', 'name': 'diskio', 'global_p95': 0.0, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'metric', 'cmdb_id': 'rabbitmq', 'name': 'mem', 'global_p95': 98456499.54133333, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'metric', 'cmdb_id': 'rabbitmq', 'name': 'socket', 'global_p95': 11.0, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'metric', 'cmdb_id': 'rabbitmq-exporter', 'name': 'cpu', 'global_p95': 0.00016357387119423996, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'metric', 'cmdb_id': 'rabbitmq-exporter', 'name': 'mem', 'global_p95': 4575232.0, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'metric', 'cmdb_id': 'rabbitmq-exporter', 'name': 'socket', 'global_p95': 1.0, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'metric', 'cmdb_id': 'session-db', 'name': 'cpu', 'global_p95': 0.2710064014845593, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'metric', 'cmdb_id': 'session-db', 'name': 'diskio', 'global_p95': 16742.14996718022, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'metric', 'cmdb_id': 'session-db', 'name': 'mem', 'global_p95': 3017823.5733333332, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}], 'trace_summary_top50': [], 'log_summary_top50': [{'source': 'log', 'cmdb_id': 'carts-db', 'name': 'log.error_count', 'global_p95': 0.0, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'log', 'cmdb_id': 'carts-db', 'name': 'log.row_count', 'global_p95': 45.0, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'log', 'cmdb_id': 'catalogue', 'name': 'log.error_count', 'global_p95': 0.0, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'log', 'cmdb_id': 'catalogue', 'name': 'log.row_count', 'global_p95': 166.0, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'log', 'cmdb_id': 'payment', 'name': 'log.error_count', 'global_p95': 0.0, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'log', 'cmdb_id': 'payment', 'name': 'log.row_count', 'global_p95': 105.8, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'log', 'cmdb_id': 'user', 'name': 'log.error_count', 'global_p95': 0.0, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'log', 'cmdb_id': 'user', 'name': 'log.row_count', 'global_p95': 618.8, 'total_points': 25, 'points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'log', 'cmdb_id': 'front-end', 'name': 'log.error_count', 'global_p95': 0.0, 'total_points': 23, 'points_in_window': 23, 'earliest_timestamp_in_window': '2024-01-18T21:44:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'log', 'cmdb_id': 'front-end', 'name': 'log.row_count', 'global_p95': 2008.7, 'total_points': 23, 'points_in_window': 23, 'earliest_timestamp_in_window': '2024-01-18T21:44:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'log', 'cmdb_id': 'carts', 'name': 'log.error_count', 'global_p95': 0.0, 'total_points': 22, 'points_in_window': 22, 'earliest_timestamp_in_window': '2024-01-18T21:45:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'log', 'cmdb_id': 'carts', 'name': 'log.row_count', 'global_p95': 125.0, 'total_points': 22, 'points_in_window': 22, 'earliest_timestamp_in_window': '2024-01-18T21:45:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'log', 'cmdb_id': 'orders', 'name': 'log.error_count', 'global_p95': 0.0, 'total_points': 22, 'points_in_window': 22, 'earliest_timestamp_in_window': '2024-01-18T21:45:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'log', 'cmdb_id': 'orders', 'name': 'log.row_count', 'global_p95': 131.9, 'total_points': 22, 'points_in_window': 22, 'earliest_timestamp_in_window': '2024-01-18T21:45:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'log', 'cmdb_id': 'queue-master', 'name': 'log.error_count', 'global_p95': 0.0, 'total_points': 22, 'points_in_window': 22, 'earliest_timestamp_in_window': '2024-01-18T21:45:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'log', 'cmdb_id': 'queue-master', 'name': 'log.row_count', 'global_p95': 593.55, 'total_points': 22, 'points_in_window': 22, 'earliest_timestamp_in_window': '2024-01-18T21:45:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'log', 'cmdb_id': 'shipping', 'name': 'log.error_count', 'global_p95': 0.0, 'total_points': 22, 'points_in_window': 22, 'earliest_timestamp_in_window': '2024-01-18T21:45:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'log', 'cmdb_id': 'shipping', 'name': 'log.row_count', 'global_p95': 65.95, 'total_points': 22, 'points_in_window': 22, 'earliest_timestamp_in_window': '2024-01-18T21:45:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00'}, {'source': 'log', 'cmdb_id': 'session-db', 'name': 'log.error_count', 'global_p95': 0.0, 'total_points': 5, 'points_in_window': 5, 'earliest_timestamp_in_window': '2024-01-18T21:45:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:05:00+00:00'}, {'source': 'log', 'cmdb_id': 'session-db', 'name': 'log.row_count', 'global_p95': 5.0, 'total_points': 5, 'points_in_window': 5, 'earliest_timestamp_in_window': '2024-01-18T21:45:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:05:00+00:00'}, {'source': 'log', 'cmdb_id': 'user-db', 'name': 'log.error_count', 'global_p95': 0.0, 'total_points': 1, 'points_in_window': 1, 'earliest_timestamp_in_window': '2024-01-18T22:04:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:04:00+00:00'}, {'source': 'log', 'cmdb_id': 'user-db', 'name': 'log.row_count', 'global_p95': 3.0, 'total_points': 1, 'points_in_window': 1, 'earliest_timestamp_in_window': '2024-01-18T22:04:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:04:00+00:00'}], 'error_logs_summary_top50': [], 'unique_cmdb_ids': ['carts', 'carts-db', 'catalogue', 'catalogue-db', 'front-end', 'orders', 'orders-db', 'payment', 'queue-master', 'rabbitmq', 'rabbitmq-exporter', 'session-db', 'shipping', 'user', 'user-db'], 'top20_metric_kpis': [{'name': 'mem', 'total_points': 300}, {'name': 'cpu', 'total_points': 275}, {'name': 'socket', 'total_points': 275}, {'name': 'diskio', 'total_points': 150}, {'name': 'error', 'total_points': 125}, {'name': 'workload', 'total_points': 125}], 'top20_trace_log_names': [{'source': 'log', 'name': 'log.error_count', 'total_points': 217}, {'source': 'log', 'name': 'log.row_count', 'total_points': 217}]}
+--------------------------------------------------------------------------------
+2026-07-04 09:36:41,127 | DEBUG | Raw Response:
+{
+    "analysis": "From the preprocessing results we have good metric coverage across most Sock Shop services in the incident window (many component-KPI series with 25 points). There is no trace telemetry and no error_log entries; logs exist and show log.error_count and log.row_count per service but log.error_count global P95 is 0.0 for many services. To find faults we should now perform metric-based anomaly detection using the precomputed global P95 thresholds (calculated from full series). The objective is to find component-KPI series that have consecutive anomalous points inside the incident window (anomalies defined as value >= global_p95). Consecutive means contiguous 60-second steps. From that we can identify candidate faulty components, their earliest anomaly times, severity (how large values exceed P95), and longest consecutive anomaly runs.\n\nWhat has been done: preprocessing produced per-(cmdb_id,kpi) global_p95 and counts in-window; confirmed no traces and no error logs. What can be derived next: which component-KPIs show sustained anomalies during the incident window and their start times/severity, to narrow root-cause candidates.\n",
+    "completed": "False",
+    "instruction": "Using metric.csv and the previously computed global_p95 per (cmdb_id,kpi), perform anomaly detection for the incident window 2024-01-18 21:39:49 → 2024-01-18 22:09:49 UTC as follows:\n1) Parse timestamps to UTC datetimes.\n2) For each (cmdb_id, kpi_name) that has points in the incident window, filter metric rows to the incident window.\n3) Mark a data point as anomalous if its value >= global_p95 for that (cmdb_id,kpi_name) (use the global_p95 computed from the full series).\n4) For each (cmdb_id,kpi_name) compute: total_points_in_window, anomaly_point_count, longest_consecutive_anomaly_len (consecutive timestamps difference == 60s), earliest_consecutive_segment_start (UTC datetime of the first point of the longest consecutive segment), max_value_in_window, and max_over_p95_ratio (max_value_in_window / global_p95; if global_p95==0 and max_value>0 set ratio to inf). Also compute mean_value_in_window.\n5) Return the top 20 rows ordered by longest_consecutive_anomaly_len desc then max_over_p95_ratio desc. Provide compact output: list of dicts with fields: cmdb_id, kpi_name, global_p95, total_points_in_window, anomaly_point_count, longest_consecutive_anomaly_len, earliest_consecutive_segment_start, max_value_in_window, max_over_p95_ratio, mean_value_in_window.\n\nLimit output to top 20 entries. If no anomalies are found using >=P95, also return a note flag (boolean) indicating that and do not attempt lowering thresholds in this step."
+}
+2026-07-04 09:36:41,128 | INFO | --------------------------------------------------------------------------------
+### Step[2]
+Analysis: From the preprocessing results we have good metric coverage across most Sock Shop services in the incident window (many component-KPI series with 25 points). There is no trace telemetry and no error_log entries; logs exist and show log.error_count and log.row_count per service but log.error_count global P95 is 0.0 for many services. To find faults we should now perform metric-based anomaly detection using the precomputed global P95 thresholds (calculated from full series). The objective is to find component-KPI series that have consecutive anomalous points inside the incident window (anomalies defined as value >= global_p95). Consecutive means contiguous 60-second steps. From that we can identify candidate faulty components, their earliest anomaly times, severity (how large values exceed P95), and longest consecutive anomaly runs.
+
+What has been done: preprocessing produced per-(cmdb_id,kpi) global_p95 and counts in-window; confirmed no traces and no error logs. What can be derived next: which component-KPIs show sustained anomalies during the incident window and their start times/severity, to narrow root-cause candidates.
+
+Instruction: Using metric.csv and the previously computed global_p95 per (cmdb_id,kpi), perform anomaly detection for the incident window 2024-01-18 21:39:49 → 2024-01-18 22:09:49 UTC as follows:
+1) Parse timestamps to UTC datetimes.
+2) For each (cmdb_id, kpi_name) that has points in the incident window, filter metric rows to the incident window.
+3) Mark a data point as anomalous if its value >= global_p95 for that (cmdb_id,kpi_name) (use the global_p95 computed from the full series).
+4) For each (cmdb_id,kpi_name) compute: total_points_in_window, anomaly_point_count, longest_consecutive_anomaly_len (consecutive timestamps difference == 60s), earliest_consecutive_segment_start (UTC datetime of the first point of the longest consecutive segment), max_value_in_window, and max_over_p95_ratio (max_value_in_window / global_p95; if global_p95==0 and max_value>0 set ratio to inf). Also compute mean_value_in_window.
+5) Return the top 20 rows ordered by longest_consecutive_anomaly_len desc then max_over_p95_ratio desc. Provide compact output: list of dicts with fields: cmdb_id, kpi_name, global_p95, total_points_in_window, anomaly_point_count, longest_consecutive_anomaly_len, earliest_consecutive_segment_start, max_value_in_window, max_over_p95_ratio, mean_value_in_window.
+
+Limit output to top 20 entries. If no anomalies are found using >=P95, also return a note flag (boolean) indicating that and do not attempt lowering thresholds in this step.
+--------------------------------------------------------------------------------
+2026-07-04 09:36:41,128 | DEBUG | Start execution
+2026-07-04 09:37:01,822 | DEBUG | Raw Code:
+import pandas as pd
+import math
+
+# Reuse existing 'metric' variable if present; otherwise load and parse timestamps
+try:
+    metric
+except NameError:
+    metric = pd.read_csv("metric.csv")
+    metric["timestamp"] = pd.to_datetime(metric["timestamp"], unit="s", utc=True)
+
+# ensure timestamp parsed and value numeric
+metric["timestamp"] = pd.to_datetime(metric["timestamp"], unit="s", utc=True)
+metric["value"] = pd.to_numeric(metric["value"], errors="coerce")
+
+# Incident window (UTC)
+incident_start = pd.to_datetime("2024-01-18 21:39:49", utc=True)
+incident_end = pd.to_datetime("2024-01-18 22:09:49", utc=True)
+
+# 1) Compute global_p95 per (cmdb_id, kpi_name) using full series (rule 9)
+global_p95_df = metric.groupby(["cmdb_id", "kpi_name"], as_index=False)["value"].quantile(0.95).rename(columns={"value": "global_p95"})
+
+# 2) Filter metric rows to the incident window
+metric_win = metric[(metric["timestamp"] >= incident_start) & (metric["timestamp"] <= incident_end)].copy()
+
+# If no points in window at all, return empty results with note
+if metric_win.empty:
+    results_list = []
+    no_anomalies = True
+else:
+    # 3) Attach global_p95 to window rows
+    metric_win = metric_win.merge(global_p95_df, on=["cmdb_id", "kpi_name"], how="left")
+
+    # 3) Mark anomalies: value >= global_p95 (NaN global_p95 -> treat as not anomaly)
+    metric_win["is_anomaly"] = False
+    # Only compare where global_p95 not null
+    mask_valid = metric_win["global_p95"].notna()
+    metric_win.loc[mask_valid, "is_anomaly"] = metric_win.loc[mask_valid, "value"] >= metric_win.loc[mask_valid, "global_p95"]
+
+    # 4) Aggregate per (cmdb_id, kpi_name)
+    agg_rows = []
+    grouped = metric_win.groupby(["cmdb_id", "kpi_name"], sort=False)
+    for (cmdb_id, kpi), grp in grouped:
+        grp = grp.sort_values("timestamp")
+        total_points_in_window = int(len(grp))
+        anomaly_point_count = int(grp["is_anomaly"].sum())
+        max_value_in_window = float(grp["value"].max())
+        mean_value_in_window = float(grp["value"].mean())
+
+        # compute max_over_p95_ratio
+        global_p95 = float(grp["global_p95"].iloc[0]) if pd.notna(grp["global_p95"].iloc[0]) else float("nan")
+        if pd.isna(global_p95):
+            max_over_p95_ratio = None
+        else:
+            if global_p95 == 0.0:
+                if max_value_in_window > 0:
+                    max_over_p95_ratio = float("inf")
+                else:
+                    max_over_p95_ratio = 0.0
+            else:
+                max_over_p95_ratio = max_value_in_window / global_p95
+
+        # Compute longest consecutive anomaly run (diff == 60s)
+        if anomaly_point_count == 0:
+            longest_consecutive_anomaly_len = 0
+            earliest_consecutive_segment_start = None
+        else:
+            anomalies = grp[grp["is_anomaly"]].copy().sort_values("timestamp")
+            # compute diffs in seconds
+            anomalies["diff_s"] = anomalies["timestamp"].diff().dt.total_seconds().fillna(9999)
+            # segment id increments when diff != 60
+            anomalies["segment_id"] = (anomalies["diff_s"] != 60).cumsum()
+            seg_sizes = anomalies.groupby("segment_id").agg(
+                seg_len=("timestamp", "size"),
+                seg_start=("timestamp", "min")
+            ).reset_index()
+            # longest segment length and earliest start among ties
+            max_len = int(seg_sizes["seg_len"].max())
+            candidates = seg_sizes[seg_sizes["seg_len"] == max_len].sort_values("seg_start")
+            earliest_start = candidates["seg_start"].iloc[0]
+            longest_consecutive_anomaly_len = max_len
+            earliest_consecutive_segment_start = earliest_start.isoformat()
+
+        agg_rows.append({
+            "cmdb_id": cmdb_id,
+            "kpi_name": kpi,
+            "global_p95": global_p95 if not math.isnan(global_p95) else None,
+            "total_points_in_window": total_points_in_window,
+            "anomaly_point_count": anomaly_point_count,
+            "longest_consecutive_anomaly_len": longest_consecutive_anomaly_len,
+            "earliest_consecutive_segment_start": earliest_consecutive_segment_start,
+            "max_value_in_window": max_value_in_window,
+            "max_over_p95_ratio": (None if max_over_p95_ratio is None else (float("inf") if math.isinf(max_over_p95_ratio) else float(max_over_p95_ratio))),
+            "mean_value_in_window": mean_value_in_window
+        })
+
+    result_df = pd.DataFrame(agg_rows)
+
+    if result_df.empty:
+        results_list = []
+        no_anomalies = True
+    else:
+        # 5) Filter to only series that have at least 1 point in window (already true) and sort
+        result_df = result_df.sort_values(by=["longest_consecutive_anomaly_len", "max_over_p95_ratio"], ascending=[False, False])
+        # top 20
+        top_df = result_df.head(20).copy()
+        # convert NaN/None to Python None for JSON-serializable
+        top_df["global_p95"] = top_df["global_p95"].where(pd.notna(top_df["global_p95"]), None)
+        top_df["earliest_consecutive_segment_start"] = top_df["earliest_consecutive_segment_start"].where(pd.notna(top_df["earliest_consecutive_segment_start"]), None)
+        # prepare final list of dicts
+        results_list = top_df[[
+            "cmdb_id", "kpi_name", "global_p95", "total_points_in_window", "anomaly_point_count",
+            "longest_consecutive_anomaly_len", "earliest_consecutive_segment_start",
+            "max_value_in_window", "max_over_p95_ratio", "mean_value_in_window"
+        ]].to_dict(orient="records")
+
+        # flag if there were zero anomaly points across all series
+        no_anomalies = int(result_df["anomaly_point_count"].sum()) == 0
+
+# Display compact outputs (list of dicts and boolean flag)
+results_list, no_anomalies
+2026-07-04 09:37:02,225 | DEBUG | Execution Result:
+([{'cmdb_id': 'catalogue', 'kpi_name': 'socket', 'global_p95': 7.0, 'total_points_in_window': 25, 'anomaly_point_count': 25, 'longest_consecutive_anomaly_len': 25, 'earliest_consecutive_segment_start': '2024-01-18T21:42:00+00:00', 'max_value_in_window': 7.0, 'max_over_p95_ratio': 1.0, 'mean_value_in_window': 7.0}, {'cmdb_id': 'catalogue-db', 'kpi_name': 'socket', 'global_p95': 4.0, 'total_points_in_window': 25, 'anomaly_point_count': 25, 'longest_consecutive_anomaly_len': 25, 'earliest_consecutive_segment_start': '2024-01-18T21:42:00+00:00', 'max_value_in_window': 4.0, 'max_over_p95_ratio': 1.0, 'mean_value_in_window': 4.0}, {'cmdb_id': 'orders-db', 'kpi_name': 'socket', 'global_p95': 5.0, 'total_points_in_window': 25, 'anomaly_point_count': 25, 'longest_consecutive_anomaly_len': 25, 'earliest_consecutive_segment_start': '2024-01-18T21:42:00+00:00', 'max_value_in_window': 5.0, 'max_over_p95_ratio': 1.0, 'mean_value_in_window': 5.0}, {'cmdb_id': 'queue-master', 'kpi_name': 'socket', 'global_p95': 3.0, 'total_points_in_window': 25, 'anomaly_point_count': 25, 'longest_consecutive_anomaly_len': 25, 'earliest_consecutive_segment_start': '2024-01-18T21:42:00+00:00', 'max_value_in_window': 3.0, 'max_over_p95_ratio': 1.0, 'mean_value_in_window': 3.0}, {'cmdb_id': 'rabbitmq', 'kpi_name': 'socket', 'global_p95': 11.0, 'total_points_in_window': 25, 'anomaly_point_count': 25, 'longest_consecutive_anomaly_len': 25, 'earliest_consecutive_segment_start': '2024-01-18T21:42:00+00:00', 'max_value_in_window': 11.0, 'max_over_p95_ratio': 1.0, 'mean_value_in_window': 11.0}, {'cmdb_id': 'rabbitmq-exporter', 'kpi_name': 'mem', 'global_p95': 4575232.0, 'total_points_in_window': 25, 'anomaly_point_count': 25, 'longest_consecutive_anomaly_len': 25, 'earliest_consecutive_segment_start': '2024-01-18T21:42:00+00:00', 'max_value_in_window': 4575232.0, 'max_over_p95_ratio': 1.0, 'mean_value_in_window': 4575232.0}, {'cmdb_id': 'rabbitmq-exporter', 'kpi_name': 'socket', 'global_p95': 1.0, 'total_points_in_window': 25, 'anomaly_point_count': 25, 'longest_consecutive_anomaly_len': 25, 'earliest_consecutive_segment_start': '2024-01-18T21:42:00+00:00', 'max_value_in_window': 1.0, 'max_over_p95_ratio': 1.0, 'mean_value_in_window': 1.0}, {'cmdb_id': 'carts', 'kpi_name': 'error', 'global_p95': 0.0, 'total_points_in_window': 25, 'anomaly_point_count': 25, 'longest_consecutive_anomaly_len': 25, 'earliest_consecutive_segment_start': '2024-01-18T21:42:00+00:00', 'max_value_in_window': 0.0, 'max_over_p95_ratio': 0.0, 'mean_value_in_window': 0.0}, {'cmdb_id': 'catalogue', 'kpi_name': 'error', 'global_p95': 0.0, 'total_points_in_window': 25, 'anomaly_point_count': 25, 'longest_consecutive_anomaly_len': 25, 'earliest_consecutive_segment_start': '2024-01-18T21:42:00+00:00', 'max_value_in_window': 0.0, 'max_over_p95_ratio': 0.0, 'mean_value_in_window': 0.0}, {'cmdb_id': 'catalogue-db', 'kpi_name': 'diskio', 'global_p95': 0.0, 'total_points_in_window': 25, 'anomaly_point_count': 25, 'longest_consecutive_anomaly_len': 25, 'earliest_consecutive_segment_start': '2024-01-18T21:42:00+00:00', 'max_value_in_window': 0.0, 'max_over_p95_ratio': 0.0, 'mean_value_in_window': 0.0}, {'cmdb_id': 'front-end', 'kpi_name': 'error', 'global_p95': 0.0, 'total_points_in_window': 25, 'anomaly_point_count': 25, 'longest_consecutive_anomaly_len': 25, 'earliest_consecutive_segment_start': '2024-01-18T21:42:00+00:00', 'max_value_in_window': 0.0, 'max_over_p95_ratio': 0.0, 'mean_value_in_window': 0.0}, {'cmdb_id': 'orders', 'kpi_name': 'error', 'global_p95': 0.0, 'total_points_in_window': 25, 'anomaly_point_count': 25, 'longest_consecutive_anomaly_len': 25, 'earliest_consecutive_segment_start': '2024-01-18T21:42:00+00:00', 'max_value_in_window': 0.0, 'max_over_p95_ratio': 0.0, 'mean_value_in_window': 0.0}, {'cmdb_id': 'payment', 'kpi_name': 'error', 'global_p95': 0.0, 'total_points_in_window': 25, 'anomaly_point_count': 25, 'longest_consecutive_anomaly_len': 25, 'earliest_consecutive_segment_start': '2024-01-18T21:42:00+00:00', 'max_value_in_window': 0.0, 'max_over_p95_ratio': 0.0, 'mean_value_in_window': 0.0}, {'cmdb_id': 'rabbitmq', 'kpi_name': 'diskio', 'global_p95': 0.0, 'total_points_in_window': 25, 'anomaly_point_count': 25, 'longest_consecutive_anomaly_len': 25, 'earliest_consecutive_segment_start': '2024-01-18T21:42:00+00:00', 'max_value_in_window': 0.0, 'max_over_p95_ratio': 0.0, 'mean_value_in_window': 0.0}, {'cmdb_id': 'session-db', 'kpi_name': 'socket', 'global_p95': 3.0, 'total_points_in_window': 25, 'anomaly_point_count': 22, 'longest_consecutive_anomaly_len': 22, 'earliest_consecutive_segment_start': '2024-01-18T21:45:00+00:00', 'max_value_in_window': 3.0, 'max_over_p95_ratio': 1.0, 'mean_value_in_window': 2.886}, {'cmdb_id': 'payment', 'kpi_name': 'socket', 'global_p95': 5.0, 'total_points_in_window': 25, 'anomaly_point_count': 14, 'longest_consecutive_anomaly_len': 14, 'earliest_consecutive_segment_start': '2024-01-18T21:53:00+00:00', 'max_value_in_window': 5.0, 'max_over_p95_ratio': 1.0, 'mean_value_in_window': 4.577333333333334}, {'cmdb_id': 'carts-db', 'kpi_name': 'socket', 'global_p95': 12.0, 'total_points_in_window': 25, 'anomaly_point_count': 4, 'longest_consecutive_anomaly_len': 4, 'earliest_consecutive_segment_start': '2024-01-18T22:03:00+00:00', 'max_value_in_window': 12.0, 'max_over_p95_ratio': 1.0, 'mean_value_in_window': 10.480666666666666}, {'cmdb_id': 'shipping', 'kpi_name': 'cpu', 'global_p95': 0.3043999903044126, 'total_points_in_window': 25, 'anomaly_point_count': 2, 'longest_consecutive_anomaly_len': 2, 'earliest_consecutive_segment_start': '2024-01-18T22:00:00+00:00', 'max_value_in_window': 0.684149678681423, 'max_over_p95_ratio': 2.247535152669502, 'mean_value_in_window': 0.254955137709445}, {'cmdb_id': 'front-end', 'kpi_name': 'cpu', 'global_p95': 4.674545211519317, 'total_points_in_window': 23, 'anomaly_point_count': 2, 'longest_consecutive_anomaly_len': 2, 'earliest_consecutive_segment_start': '2024-01-18T21:46:00+00:00', 'max_value_in_window': 5.388896487069748, 'max_over_p95_ratio': 1.1528172780937236, 'mean_value_in_window': 4.196202227146493}, {'cmdb_id': 'user', 'kpi_name': 'latency-50', 'global_p95': 0.03183205334507295, 'total_points_in_window': 22, 'anomaly_point_count': 2, 'longest_consecutive_anomaly_len': 2, 'earliest_consecutive_segment_start': '2024-01-18T22:02:00+00:00', 'max_value_in_window': 0.0349139764783434, 'max_over_p95_ratio': 1.0968182322346942, 'mean_value_in_window': 0.016113780132729374}], False)
+2026-07-04 09:37:02,225 | DEBUG | Execution finished. Time cost: 0:00:21.096901
+2026-07-04 09:37:12,279 | DEBUG | Brief Answer:
+Summary of anomaly detection for the incident window (2024-01-18 21:39:49 → 22:09:49 UTC):
+
+- Overall
+  - Anomalies were found (no_anomalies = False).
+  - Many series are flagged because value >= global_p95 for the whole window; some of these are artifacts (global_p95 == value or global_p95 == 0).
+
+- Top series with the longest consecutive anomaly runs (sorted by run length):
+  - Full-window runs (25 consecutive minutes): catalogue.socket, catalogue-db.socket, orders-db.socket, queue-master.socket, rabbitmq.socket, rabbitmq-exporter.mem, rabbitmq-exporter.socket, carts.error, catalogue.error, catalogue-db.diskio, front-end.error, orders.error, payment.error, rabbitmq.diskio.
+    - Note: many of these are either values equal to their P95 or have global_p95 == 0 (e.g., error and some diskio series) — these should be treated cautiously as they may not indicate a spike.
+  - session-db.socket — 22 consecutive anomaly minutes (start 2024-01-18T21:45:00Z), mean ~2.886, max 3.0 (ratio 1.0).
+  - payment.socket — 14 consecutive anomaly minutes (start 2024-01-18T21:53:00Z), mean ~4.577, max 5.0 (ratio 1.0).
+  - carts-db.socket — 4 consecutive anomaly minutes (start 2024-01-18T22:03:00Z), mean ~10.48, max 12.0 (ratio 1.0).
+  - shipping.cpu — 2 consecutive anomaly minutes (start 2024-01-18T22:00:00Z), mean ~0.255, max ~0.684, max_over_p95_ratio ≈ 2.25 (largest ratio observed).
+  - front-end.cpu — 2 consecutive anomaly minutes (start 2024-01-18T21:46:00Z), mean ~4.196, max ~5.389, ratio ≈ 1.15.
+  - user.latency-50 — 2 consecutive anomaly minutes (start 2024-01-18T22:02:00Z), mean ~0.016, max ~0.0349, ratio ≈ 1.10.
+
+- Interpretation / priorities
+  - Highest relative spike: shipping.cpu (max ≈2.25×P95) — investigate CPU usage on the shipping service around 22:00 UTC.
+  - Moderate relative spikes: front-end.cpu and user latency-50 (ratios ~1.15 and ~1.10) — check front-end load and request latency correlating with user latency changes.
+  - Long sustained baseline at/above P95: many socket and mem series show full-window anomaly runs where value == global_p95 — these likely reflect high baseline values or quantile tie behavior rather than sudden spikes; treat them as lower-priority unless other signals (logs/traces) corroborate problems.
+  - Several series flagged because global_p95 == 0 and values == 0 — not actionable.
+
+- Recommended next steps
+  - Investigate shipping CPU around 22:00 UTC and front-end CPU / user latency for causation.
+  - Correlate with logs and traces (not present in trace summary) for the same timestamps to confirm root cause.
+  - De-prioritize series with global_p95 == 0 or those where values simply equal P95 unless additional evidence exists.
+2026-07-04 09:37:12,279 | INFO | --------------------------------------------------------------------------------
+Step[2]
+### Observation:
+Summary of anomaly detection for the incident window (2024-01-18 21:39:49 → 22:09:49 UTC):
+
+- Overall
+  - Anomalies were found (no_anomalies = False).
+  - Many series are flagged because value >= global_p95 for the whole window; some of these are artifacts (global_p95 == value or global_p95 == 0).
+
+- Top series with the longest consecutive anomaly runs (sorted by run length):
+  - Full-window runs (25 consecutive minutes): catalogue.socket, catalogue-db.socket, orders-db.socket, queue-master.socket, rabbitmq.socket, rabbitmq-exporter.mem, rabbitmq-exporter.socket, carts.error, catalogue.error, catalogue-db.diskio, front-end.error, orders.error, payment.error, rabbitmq.diskio.
+    - Note: many of these are either values equal to their P95 or have global_p95 == 0 (e.g., error and some diskio series) — these should be treated cautiously as they may not indicate a spike.
+  - session-db.socket — 22 consecutive anomaly minutes (start 2024-01-18T21:45:00Z), mean ~2.886, max 3.0 (ratio 1.0).
+  - payment.socket — 14 consecutive anomaly minutes (start 2024-01-18T21:53:00Z), mean ~4.577, max 5.0 (ratio 1.0).
+  - carts-db.socket — 4 consecutive anomaly minutes (start 2024-01-18T22:03:00Z), mean ~10.48, max 12.0 (ratio 1.0).
+  - shipping.cpu — 2 consecutive anomaly minutes (start 2024-01-18T22:00:00Z), mean ~0.255, max ~0.684, max_over_p95_ratio ≈ 2.25 (largest ratio observed).
+  - front-end.cpu — 2 consecutive anomaly minutes (start 2024-01-18T21:46:00Z), mean ~4.196, max ~5.389, ratio ≈ 1.15.
+  - user.latency-50 — 2 consecutive anomaly minutes (start 2024-01-18T22:02:00Z), mean ~0.016, max ~0.0349, ratio ≈ 1.10.
+
+- Interpretation / priorities
+  - Highest relative spike: shipping.cpu (max ≈2.25×P95) — investigate CPU usage on the shipping service around 22:00 UTC.
+  - Moderate relative spikes: front-end.cpu and user latency-50 (ratios ~1.15 and ~1.10) — check front-end load and request latency correlating with user latency changes.
+  - Long sustained baseline at/above P95: many socket and mem series show full-window anomaly runs where value == global_p95 — these likely reflect high baseline values or quantile tie behavior rather than sudden spikes; treat them as lower-priority unless other signals (logs/traces) corroborate problems.
+  - Several series flagged because global_p95 == 0 and values == 0 — not actionable.
+
+- Recommended next steps
+  - Investigate shipping CPU around 22:00 UTC and front-end CPU / user latency for causation.
+  - Correlate with logs and traces (not present in trace summary) for the same timestamps to confirm root cause.
+  - De-prioritize series with global_p95 == 0 or those where values simply equal P95 unless additional evidence exists.
+
+The original code execution output of IPython Kernel is also provided below for reference:
+
+([{'cmdb_id': 'catalogue', 'kpi_name': 'socket', 'global_p95': 7.0, 'total_points_in_window': 25, 'anomaly_point_count': 25, 'longest_consecutive_anomaly_len': 25, 'earliest_consecutive_segment_start': '2024-01-18T21:42:00+00:00', 'max_value_in_window': 7.0, 'max_over_p95_ratio': 1.0, 'mean_value_in_window': 7.0}, {'cmdb_id': 'catalogue-db', 'kpi_name': 'socket', 'global_p95': 4.0, 'total_points_in_window': 25, 'anomaly_point_count': 25, 'longest_consecutive_anomaly_len': 25, 'earliest_consecutive_segment_start': '2024-01-18T21:42:00+00:00', 'max_value_in_window': 4.0, 'max_over_p95_ratio': 1.0, 'mean_value_in_window': 4.0}, {'cmdb_id': 'orders-db', 'kpi_name': 'socket', 'global_p95': 5.0, 'total_points_in_window': 25, 'anomaly_point_count': 25, 'longest_consecutive_anomaly_len': 25, 'earliest_consecutive_segment_start': '2024-01-18T21:42:00+00:00', 'max_value_in_window': 5.0, 'max_over_p95_ratio': 1.0, 'mean_value_in_window': 5.0}, {'cmdb_id': 'queue-master', 'kpi_name': 'socket', 'global_p95': 3.0, 'total_points_in_window': 25, 'anomaly_point_count': 25, 'longest_consecutive_anomaly_len': 25, 'earliest_consecutive_segment_start': '2024-01-18T21:42:00+00:00', 'max_value_in_window': 3.0, 'max_over_p95_ratio': 1.0, 'mean_value_in_window': 3.0}, {'cmdb_id': 'rabbitmq', 'kpi_name': 'socket', 'global_p95': 11.0, 'total_points_in_window': 25, 'anomaly_point_count': 25, 'longest_consecutive_anomaly_len': 25, 'earliest_consecutive_segment_start': '2024-01-18T21:42:00+00:00', 'max_value_in_window': 11.0, 'max_over_p95_ratio': 1.0, 'mean_value_in_window': 11.0}, {'cmdb_id': 'rabbitmq-exporter', 'kpi_name': 'mem', 'global_p95': 4575232.0, 'total_points_in_window': 25, 'anomaly_point_count': 25, 'longest_consecutive_anomaly_len': 25, 'earliest_consecutive_segment_start': '2024-01-18T21:42:00+00:00', 'max_value_in_window': 4575232.0, 'max_over_p95_ratio': 1.0, 'mean_value_in_window': 4575232.0}, {'cmdb_id': 'rabbitmq-exporter', 'kpi_name': 'socket', 'global_p95': 1.0, 'total_points_in_window': 25, 'anomaly_point_count': 25, 'longest_consecutive_anomaly_len': 25, 'earliest_consecutive_segment_start': '2024-01-18T21:42:00+00:00', 'max_value_in_window': 1.0, 'max_over_p95_ratio': 1.0, 'mean_value_in_window': 1.0}, {'cmdb_id': 'carts', 'kpi_name': 'error', 'global_p95': 0.0, 'total_points_in_window': 25, 'anomaly_point_count': 25, 'longest_consecutive_anomaly_len': 25, 'earliest_consecutive_segment_start': '2024-01-18T21:42:00+00:00', 'max_value_in_window': 0.0, 'max_over_p95_ratio': 0.0, 'mean_value_in_window': 0.0}, {'cmdb_id': 'catalogue', 'kpi_name': 'error', 'global_p95': 0.0, 'total_points_in_window': 25, 'anomaly_point_count': 25, 'longest_consecutive_anomaly_len': 25, 'earliest_consecutive_segment_start': '2024-01-18T21:42:00+00:00', 'max_value_in_window': 0.0, 'max_over_p95_ratio': 0.0, 'mean_value_in_window': 0.0}, {'cmdb_id': 'catalogue-db', 'kpi_name': 'diskio', 'global_p95': 0.0, 'total_points_in_window': 25, 'anomaly_point_count': 25, 'longest_consecutive_anomaly_len': 25, 'earliest_consecutive_segment_start': '2024-01-18T21:42:00+00:00', 'max_value_in_window': 0.0, 'max_over_p95_ratio': 0.0, 'mean_value_in_window': 0.0}, {'cmdb_id': 'front-end', 'kpi_name': 'error', 'global_p95': 0.0, 'total_points_in_window': 25, 'anomaly_point_count': 25, 'longest_consecutive_anomaly_len': 25, 'earliest_consecutive_segment_start': '2024-01-18T21:42:00+00:00', 'max_value_in_window': 0.0, 'max_over_p95_ratio': 0.0, 'mean_value_in_window': 0.0}, {'cmdb_id': 'orders', 'kpi_name': 'error', 'global_p95': 0.0, 'total_points_in_window': 25, 'anomaly_point_count': 25, 'longest_consecutive_anomaly_len': 25, 'earliest_consecutive_segment_start': '2024-01-18T21:42:00+00:00', 'max_value_in_window': 0.0, 'max_over_p95_ratio': 0.0, 'mean_value_in_window': 0.0}, {'cmdb_id': 'payment', 'kpi_name': 'error', 'global_p95': 0.0, 'total_points_in_window': 25, 'anomaly_point_count': 25, 'longest_consecutive_anomaly_len': 25, 'earliest_consecutive_segment_start': '2024-01-18T21:42:00+00:00', 'max_value_in_window': 0.0, 'max_over_p95_ratio': 0.0, 'mean_value_in_window': 0.0}, {'cmdb_id': 'rabbitmq', 'kpi_name': 'diskio', 'global_p95': 0.0, 'total_points_in_window': 25, 'anomaly_point_count': 25, 'longest_consecutive_anomaly_len': 25, 'earliest_consecutive_segment_start': '2024-01-18T21:42:00+00:00', 'max_value_in_window': 0.0, 'max_over_p95_ratio': 0.0, 'mean_value_in_window': 0.0}, {'cmdb_id': 'session-db', 'kpi_name': 'socket', 'global_p95': 3.0, 'total_points_in_window': 25, 'anomaly_point_count': 22, 'longest_consecutive_anomaly_len': 22, 'earliest_consecutive_segment_start': '2024-01-18T21:45:00+00:00', 'max_value_in_window': 3.0, 'max_over_p95_ratio': 1.0, 'mean_value_in_window': 2.886}, {'cmdb_id': 'payment', 'kpi_name': 'socket', 'global_p95': 5.0, 'total_points_in_window': 25, 'anomaly_point_count': 14, 'longest_consecutive_anomaly_len': 14, 'earliest_consecutive_segment_start': '2024-01-18T21:53:00+00:00', 'max_value_in_window': 5.0, 'max_over_p95_ratio': 1.0, 'mean_value_in_window': 4.577333333333334}, {'cmdb_id': 'carts-db', 'kpi_name': 'socket', 'global_p95': 12.0, 'total_points_in_window': 25, 'anomaly_point_count': 4, 'longest_consecutive_anomaly_len': 4, 'earliest_consecutive_segment_start': '2024-01-18T22:03:00+00:00', 'max_value_in_window': 12.0, 'max_over_p95_ratio': 1.0, 'mean_value_in_window': 10.480666666666666}, {'cmdb_id': 'shipping', 'kpi_name': 'cpu', 'global_p95': 0.3043999903044126, 'total_points_in_window': 25, 'anomaly_point_count': 2, 'longest_consecutive_anomaly_len': 2, 'earliest_consecutive_segment_start': '2024-01-18T22:00:00+00:00', 'max_value_in_window': 0.684149678681423, 'max_over_p95_ratio': 2.247535152669502, 'mean_value_in_window': 0.254955137709445}, {'cmdb_id': 'front-end', 'kpi_name': 'cpu', 'global_p95': 4.674545211519317, 'total_points_in_window': 23, 'anomaly_point_count': 2, 'longest_consecutive_anomaly_len': 2, 'earliest_consecutive_segment_start': '2024-01-18T21:46:00+00:00', 'max_value_in_window': 5.388896487069748, 'max_over_p95_ratio': 1.1528172780937236, 'mean_value_in_window': 4.196202227146493}, {'cmdb_id': 'user', 'kpi_name': 'latency-50', 'global_p95': 0.03183205334507295, 'total_points_in_window': 22, 'anomaly_point_count': 2, 'longest_consecutive_anomaly_len': 2, 'earliest_consecutive_segment_start': '2024-01-18T22:02:00+00:00', 'max_value_in_window': 0.0349139764783434, 'max_over_p95_ratio': 1.0968182322346942, 'mean_value_in_window': 0.016113780132729374}], False)
+--------------------------------------------------------------------------------
+2026-07-04 09:37:25,641 | DEBUG | Raw Response:
+{
+    "analysis": "From anomaly detection we found several candidate anomalies. Most long 'anomalies' are artifacts where values equal global P95 or global P95==0 (e.g., many socket and error/diskio series). The most meaningful spikes are: (1) shipping.cpu with a short but strong breach (~2.25×P95) starting ~2024-01-18T22:00:00Z; (2) front-end.cpu with a small breach (~1.15×P95) around 21:46 UTC; (3) user latency-50 with a small breach (~1.10×P95) around 22:02 UTC. To localize the root cause we must (a) inspect raw metric points around these anomaly times to confirm the shape and timing, and (b) correlate with log features (log.error_count and log.row_count) for the same services to see if errors or traffic drops coincide. There are no traces and no error_log entries to use. Next step: retrieve full global P95 (computed from the full metric series) for the candidate (cmdb_id,kpi) pairs, then return the filtered per-minute metric rows within the incident window with an anomaly flag (value >= global_p95), plus a small per-pair summary (earliest anomaly, anomaly count, max value, max_over_p95_ratio). Also retrieve matching log.csv rows for these components and the two log features (log.error_count, log.row_count) in the same window to correlate.\n",
+    "completed": "False",
+    "instruction": "For the incident window 2024-01-18 21:39:49 → 2024-01-18 22:09:49 UTC perform the following using the CSV files in the working directory. Parse timestamps with pd.to_datetime(..., unit='s', utc=True). Do NOT compute thresholds after filtering; compute global P95 from the full metric series for each queried pair first.\n\n1) For candidate metric pairs: (shipping, 'cpu'), (front-end, 'cpu'), (user, 'latency-50') — compute global_p95 for each pair from the entire metric.csv series. Then filter metric.csv to the incident window for those pairs and return all rows (timestamp as ISO UTC string, cmdb_id, kpi_name, value). For each returned pair also include: global_p95, anomaly_flag (value >= global_p95), earliest_anomaly_timestamp_in_window (first timestamp where anomaly_flag True), anomaly_point_count_in_window, max_value_in_window, max_over_p95_ratio (max_value / global_p95; if global_p95==0 and max_value>0 set ratio to inf), mean_value_in_window.\n\n2) From log.csv, filter rows in the incident window for cmdb_id in ['shipping','front-end','user'] and log_name in ['log.error_count','log.row_count']. Return rows (timestamp ISO UTC, cmdb_id, log_name, value) and also compute per (cmdb_id,log_name) aggregates: total_points_in_window, earliest_timestamp_in_window, latest_timestamp_in_window, sum_value_in_window, max_value_in_window.\n\nLimit outputs: return full metric rows for these three pairs (they are small) and limit log rows to top 100 rows. Provide results as JSON-serializable structures (lists of dicts)."
+}
+2026-07-04 09:37:25,642 | INFO | --------------------------------------------------------------------------------
+### Step[3]
+Analysis: From anomaly detection we found several candidate anomalies. Most long 'anomalies' are artifacts where values equal global P95 or global P95==0 (e.g., many socket and error/diskio series). The most meaningful spikes are: (1) shipping.cpu with a short but strong breach (~2.25×P95) starting ~2024-01-18T22:00:00Z; (2) front-end.cpu with a small breach (~1.15×P95) around 21:46 UTC; (3) user latency-50 with a small breach (~1.10×P95) around 22:02 UTC. To localize the root cause we must (a) inspect raw metric points around these anomaly times to confirm the shape and timing, and (b) correlate with log features (log.error_count and log.row_count) for the same services to see if errors or traffic drops coincide. There are no traces and no error_log entries to use. Next step: retrieve full global P95 (computed from the full metric series) for the candidate (cmdb_id,kpi) pairs, then return the filtered per-minute metric rows within the incident window with an anomaly flag (value >= global_p95), plus a small per-pair summary (earliest anomaly, anomaly count, max value, max_over_p95_ratio). Also retrieve matching log.csv rows for these components and the two log features (log.error_count, log.row_count) in the same window to correlate.
+
+Instruction: For the incident window 2024-01-18 21:39:49 → 2024-01-18 22:09:49 UTC perform the following using the CSV files in the working directory. Parse timestamps with pd.to_datetime(..., unit='s', utc=True). Do NOT compute thresholds after filtering; compute global P95 from the full metric series for each queried pair first.
+
+1) For candidate metric pairs: (shipping, 'cpu'), (front-end, 'cpu'), (user, 'latency-50') — compute global_p95 for each pair from the entire metric.csv series. Then filter metric.csv to the incident window for those pairs and return all rows (timestamp as ISO UTC string, cmdb_id, kpi_name, value). For each returned pair also include: global_p95, anomaly_flag (value >= global_p95), earliest_anomaly_timestamp_in_window (first timestamp where anomaly_flag True), anomaly_point_count_in_window, max_value_in_window, max_over_p95_ratio (max_value / global_p95; if global_p95==0 and max_value>0 set ratio to inf), mean_value_in_window.
+
+2) From log.csv, filter rows in the incident window for cmdb_id in ['shipping','front-end','user'] and log_name in ['log.error_count','log.row_count']. Return rows (timestamp ISO UTC, cmdb_id, log_name, value) and also compute per (cmdb_id,log_name) aggregates: total_points_in_window, earliest_timestamp_in_window, latest_timestamp_in_window, sum_value_in_window, max_value_in_window.
+
+Limit outputs: return full metric rows for these three pairs (they are small) and limit log rows to top 100 rows. Provide results as JSON-serializable structures (lists of dicts).
+--------------------------------------------------------------------------------
+2026-07-04 09:37:25,642 | DEBUG | Start execution
+2026-07-04 09:37:56,098 | DEBUG | Raw Code:
+import pandas as pd
+import math
+
+# Reuse existing variables if available; otherwise load CSVs
+try:
+    metric
+except NameError:
+    metric = pd.read_csv("metric.csv")
+    metric["timestamp"] = pd.to_datetime(metric["timestamp"], unit="s", utc=True)
+    metric["value"] = pd.to_numeric(metric["value"], errors="coerce")
+
+try:
+    log
+except NameError:
+    log = pd.read_csv("log.csv")
+    log["timestamp"] = pd.to_datetime(log["timestamp"], unit="s", utc=True)
+    log["value"] = pd.to_numeric(log["value"], errors="coerce")
+
+# Ensure timestamps and numeric values
+metric["timestamp"] = pd.to_datetime(metric["timestamp"], unit="s", utc=True)
+metric["value"] = pd.to_numeric(metric["value"], errors="coerce")
+log["timestamp"] = pd.to_datetime(log["timestamp"], unit="s", utc=True)
+log["value"] = pd.to_numeric(log["value"], errors="coerce")
+
+# Incident window
+incident_start = pd.to_datetime("2024-01-18 21:39:49", utc=True)
+incident_end = pd.to_datetime("2024-01-18 22:09:49", utc=True)
+
+# Candidate metric pairs
+candidates = [
+    ("shipping", "cpu"),
+    ("front-end", "cpu"),
+    ("user", "latency-50")
+]
+
+# Compute global P95 for all (cmdb_id, kpi_name) using full metric series (rule 9)
+global_p95_df = metric.groupby(["cmdb_id", "kpi_name"], as_index=False)["value"].quantile(0.95).rename(columns={"value": "global_p95"})
+
+# Prepare outputs
+metric_rows_out = []     # will contain row dicts for the three pairs (timestamp ISO, cmdb_id, kpi_name, value, anomaly_flag)
+metric_agg_out = []      # per-pair aggregates
+
+for cmdb_id, kpi in candidates:
+    # fetch global_p95 for the pair (None if missing)
+    gp_row = global_p95_df[(global_p95_df["cmdb_id"] == cmdb_id) & (global_p95_df["kpi_name"] == kpi)]
+    if not gp_row.empty:
+        global_p95 = float(gp_row["global_p95"].iloc[0])
+    else:
+        global_p95 = None
+
+    # filter full metric to incident window and the pair
+    pair_win = metric[
+        (metric["cmdb_id"] == cmdb_id) &
+        (metric["kpi_name"] == kpi) &
+        (metric["timestamp"] >= incident_start) &
+        (metric["timestamp"] <= incident_end)
+    ].sort_values("timestamp").copy()
+
+    # compute per-row anomaly flag using global_p95 (do not recompute threshold after filtering)
+    if global_p95 is None:
+        pair_win["anomaly_flag"] = False
+    else:
+        # compare >= global_p95; handle NaNs safely
+        pair_win["anomaly_flag"] = pair_win["value"].ge(global_p95)
+
+    # add rows to metric_rows_out with timestamp as ISO UTC
+    for _, r in pair_win.iterrows():
+        metric_rows_out.append({
+            "timestamp": r["timestamp"].isoformat(),
+            "cmdb_id": r["cmdb_id"],
+            "kpi_name": r["kpi_name"],
+            "value": None if pd.isna(r["value"]) else float(r["value"]),
+            "anomaly_flag": bool(r["anomaly_flag"])
+        })
+
+    # compute aggregates for the pair
+    total_points_in_window = int(len(pair_win))
+    anomaly_point_count_in_window = int(pair_win["anomaly_flag"].sum()) if total_points_in_window > 0 else 0
+    earliest_anomaly_ts = None
+    if anomaly_point_count_in_window > 0:
+        earliest_anomaly_ts = pair_win[pair_win["anomaly_flag"]]["timestamp"].min().isoformat()
+
+    max_value_in_window = None
+    mean_value_in_window = None
+    max_over_p95_ratio = None
+
+    if total_points_in_window > 0:
+        max_value = float(pair_win["value"].max()) if not pair_win["value"].isna().all() else None
+        mean_value = float(pair_win["value"].mean()) if not pair_win["value"].isna().all() else None
+        max_value_in_window = max_value
+        mean_value_in_window = mean_value
+
+        # compute ratio with special handling for global_p95==0
+        if global_p95 is None:
+            max_over_p95_ratio = None
+        else:
+            if global_p95 == 0.0:
+                if max_value_in_window is not None and max_value_in_window > 0:
+                    max_over_p95_ratio = float("inf")
+                else:
+                    max_over_p95_ratio = 0.0
+            else:
+                max_over_p95_ratio = None if max_value_in_window is None else (max_value_in_window / global_p95)
+
+    metric_agg_out.append({
+        "cmdb_id": cmdb_id,
+        "kpi_name": kpi,
+        "global_p95": None if global_p95 is None else float(global_p95),
+        "total_points_in_window": total_points_in_window,
+        "anomaly_point_count_in_window": anomaly_point_count_in_window,
+        "earliest_anomaly_timestamp_in_window": earliest_anomaly_ts,
+        "max_value_in_window": max_value_in_window,
+        "max_over_p95_ratio": (None if max_over_p95_ratio is None else (float("inf") if math.isinf(max_over_p95_ratio) else float(max_over_p95_ratio))),
+        "mean_value_in_window": mean_value_in_window
+    })
+
+# Part 2: logs for cmdb_id in ['shipping','front-end','user'] and log_name in ['log.error_count','log.row_count'] within window
+log_cmdbs = ["shipping", "front-end", "user"]
+log_names = ["log.error_count", "log.row_count"]
+
+log_win = log[
+    (log["cmdb_id"].isin(log_cmdbs)) &
+    (log["log_name"].isin(log_names)) &
+    (log["timestamp"] >= incident_start) &
+    (log["timestamp"] <= incident_end)
+].sort_values(["cmdb_id", "log_name", "timestamp"]).copy()
+
+# Prepare log rows limited to top 100
+log_rows_out = []
+for _, r in log_win.head(100).iterrows():
+    log_rows_out.append({
+        "timestamp": r["timestamp"].isoformat(),
+        "cmdb_id": r["cmdb_id"],
+        "log_name": r["log_name"],
+        "value": None if pd.isna(r["value"]) else float(r["value"])
+    })
+
+# Aggregates per (cmdb_id, log_name)
+if not log_win.empty:
+    log_agg = log_win.groupby(["cmdb_id", "log_name"], as_index=False).agg(
+        total_points_in_window=("timestamp", "size"),
+        earliest_timestamp_in_window=("timestamp", "min"),
+        latest_timestamp_in_window=("timestamp", "max"),
+        sum_value_in_window=("value", "sum"),
+        max_value_in_window=("value", "max")
+    )
+    # convert timestamps to ISO and ensure numeric types
+    log_agg["earliest_timestamp_in_window"] = log_agg["earliest_timestamp_in_window"].dt.isoformat()
+    log_agg["latest_timestamp_in_window"] = log_agg["latest_timestamp_in_window"].dt.isoformat()
+    # prepare list of dicts
+    log_agg_out = []
+    for _, r in log_agg.iterrows():
+        log_agg_out.append({
+            "cmdb_id": r["cmdb_id"],
+            "log_name": r["log_name"],
+            "total_points_in_window": int(r["total_points_in_window"]),
+            "earliest_timestamp_in_window": r["earliest_timestamp_in_window"],
+            "latest_timestamp_in_window": r["latest_timestamp_in_window"],
+            "sum_value_in_window": None if pd.isna(r["sum_value_in_window"]) else float(r["sum_value_in_window"]),
+            "max_value_in_window": None if pd.isna(r["max_value_in_window"]) else float(r["max_value_in_window"])
+        })
+else:
+    log_agg_out = []
+
+# Final outputs (JSON-serializable): metric rows (all rows for the three pairs), metric aggregates per pair, log rows (top 100), log aggregates per (cmdb_id,log_name)
+metric_rows_out, metric_agg_out, log_rows_out, log_agg_out
+2026-07-04 09:37:56,264 | WARNING | Execution failed. Error message: Traceback (most recent call last):
+  File "/root/.local/lib/python3.10/site-packages/IPython/core/interactiveshell.py", line 3579, in run_code
+    exec(code_obj, self.user_global_ns, self.user_ns)
+  File "<ipython-input-1-f76726efcba5>", line 148, in <module>
+    log_agg["earliest_timestamp_in_window"] = log_agg["earliest_timestamp_in_window"].dt.isoformat()
+AttributeError: 'DatetimeProperties' object has no attribute 'isoformat'
+
+2026-07-04 09:37:56,264 | DEBUG | Execution finished. Time cost: 0:00:30.621865
+2026-07-04 09:38:20,496 | DEBUG | Raw Code:
+import pandas as pd
+import math
+
+# Load or reuse metric and log DataFrames, ensure timestamps parsed as UTC and values numeric
+try:
+    metric
+except NameError:
+    metric = pd.read_csv("metric.csv")
+    metric["timestamp"] = pd.to_datetime(metric["timestamp"], unit="s", utc=True)
+    metric["value"] = pd.to_numeric(metric["value"], errors="coerce")
+
+try:
+    log
+except NameError:
+    log = pd.read_csv("log.csv")
+    log["timestamp"] = pd.to_datetime(log["timestamp"], unit="s", utc=True)
+    log["value"] = pd.to_numeric(log["value"], errors="coerce")
+
+metric["timestamp"] = pd.to_datetime(metric["timestamp"], unit="s", utc=True)
+metric["value"] = pd.to_numeric(metric["value"], errors="coerce")
+log["timestamp"] = pd.to_datetime(log["timestamp"], unit="s", utc=True)
+log["value"] = pd.to_numeric(log["value"], errors="coerce")
+
+# Incident window
+incident_start = pd.to_datetime("2024-01-18 21:39:49", utc=True)
+incident_end = pd.to_datetime("2024-01-18 22:09:49", utc=True)
+
+# Candidate metric pairs
+candidates = [
+    ("shipping", "cpu"),
+    ("front-end", "cpu"),
+    ("user", "latency-50")
+]
+
+# Compute global P95 for all (cmdb_id, kpi_name) using full metric series
+global_p95_df = metric.groupby(["cmdb_id", "kpi_name"], as_index=False)["value"].quantile(0.95).rename(columns={"value": "global_p95"})
+
+# Prepare outputs
+metric_rows_out = []
+metric_agg_out = []
+
+for cmdb_id, kpi in candidates:
+    gp_row = global_p95_df[(global_p95_df["cmdb_id"] == cmdb_id) & (global_p95_df["kpi_name"] == kpi)]
+    global_p95 = float(gp_row["global_p95"].iloc[0]) if not gp_row.empty else None
+
+    pair_win = metric[
+        (metric["cmdb_id"] == cmdb_id) &
+        (metric["kpi_name"] == kpi) &
+        (metric["timestamp"] >= incident_start) &
+        (metric["timestamp"] <= incident_end)
+    ].sort_values("timestamp").copy()
+
+    if global_p95 is None:
+        pair_win["anomaly_flag"] = False
+    else:
+        pair_win["anomaly_flag"] = pair_win["value"].ge(global_p95)
+
+    for _, r in pair_win.iterrows():
+        metric_rows_out.append({
+            "timestamp": r["timestamp"].isoformat(),
+            "cmdb_id": r["cmdb_id"],
+            "kpi_name": r["kpi_name"],
+            "value": None if pd.isna(r["value"]) else float(r["value"]),
+            "anomaly_flag": bool(r["anomaly_flag"])
+        })
+
+    total_points_in_window = int(len(pair_win))
+    anomaly_point_count_in_window = int(pair_win["anomaly_flag"].sum()) if total_points_in_window > 0 else 0
+    earliest_anomaly_ts = None
+    if anomaly_point_count_in_window > 0:
+        earliest_anomaly_ts = pair_win[pair_win["anomaly_flag"]]["timestamp"].min().isoformat()
+
+    max_value_in_window = None
+    mean_value_in_window = None
+    max_over_p95_ratio = None
+
+    if total_points_in_window > 0:
+        max_val = float(pair_win["value"].max()) if not pair_win["value"].isna().all() else None
+        mean_val = float(pair_win["value"].mean()) if not pair_win["value"].isna().all() else None
+        max_value_in_window = max_val
+        mean_value_in_window = mean_val
+
+        if global_p95 is None:
+            max_over_p95_ratio = None
+        else:
+            if global_p95 == 0.0:
+                if max_value_in_window is not None and max_value_in_window > 0:
+                    max_over_p95_ratio = float("inf")
+                else:
+                    max_over_p95_ratio = 0.0
+            else:
+                max_over_p95_ratio = None if max_value_in_window is None else (max_value_in_window / global_p95)
+
+    metric_agg_out.append({
+        "cmdb_id": cmdb_id,
+        "kpi_name": kpi,
+        "global_p95": None if global_p95 is None else float(global_p95),
+        "total_points_in_window": total_points_in_window,
+        "anomaly_point_count_in_window": anomaly_point_count_in_window,
+        "earliest_anomaly_timestamp_in_window": earliest_anomaly_ts,
+        "max_value_in_window": max_value_in_window,
+        "max_over_p95_ratio": (None if max_over_p95_ratio is None else (float("inf") if math.isinf(max_over_p95_ratio) else float(max_over_p95_ratio))),
+        "mean_value_in_window": mean_value_in_window
+    })
+
+# Part 2: logs for specified cmdb_ids and log_names within window
+log_cmdbs = ["shipping", "front-end", "user"]
+log_names = ["log.error_count", "log.row_count"]
+
+log_win = log[
+    (log["cmdb_id"].isin(log_cmdbs)) &
+    (log["log_name"].isin(log_names)) &
+    (log["timestamp"] >= incident_start) &
+    (log["timestamp"] <= incident_end)
+].sort_values(["cmdb_id", "log_name", "timestamp"]).copy()
+
+log_rows_out = []
+for _, r in log_win.head(100).iterrows():
+    log_rows_out.append({
+        "timestamp": r["timestamp"].isoformat(),
+        "cmdb_id": r["cmdb_id"],
+        "log_name": r["log_name"],
+        "value": None if pd.isna(r["value"]) else float(r["value"])
+    })
+
+if not log_win.empty:
+    log_agg = log_win.groupby(["cmdb_id", "log_name"], as_index=False).agg(
+        total_points_in_window=("timestamp", "size"),
+        earliest_timestamp_in_window=("timestamp", "min"),
+        latest_timestamp_in_window=("timestamp", "max"),
+        sum_value_in_window=("value", "sum"),
+        max_value_in_window=("value", "max")
+    )
+    # convert timestamps to ISO using apply
+    log_agg["earliest_timestamp_in_window"] = log_agg["earliest_timestamp_in_window"].apply(lambda x: x.isoformat())
+    log_agg["latest_timestamp_in_window"] = log_agg["latest_timestamp_in_window"].apply(lambda x: x.isoformat())
+    log_agg_out = []
+    for _, r in log_agg.iterrows():
+        log_agg_out.append({
+            "cmdb_id": r["cmdb_id"],
+            "log_name": r["log_name"],
+            "total_points_in_window": int(r["total_points_in_window"]),
+            "earliest_timestamp_in_window": r["earliest_timestamp_in_window"],
+            "latest_timestamp_in_window": r["latest_timestamp_in_window"],
+            "sum_value_in_window": None if pd.isna(r["sum_value_in_window"]) else float(r["sum_value_in_window"]),
+            "max_value_in_window": None if pd.isna(r["max_value_in_window"]) else float(r["max_value_in_window"])
+        })
+else:
+    log_agg_out = []
+
+# Return results (JSON-serializable)
+metric_rows_out, metric_agg_out, log_rows_out, log_agg_out
+2026-07-04 09:38:20,565 | DEBUG | Execution Result:
+([{'timestamp': '2024-01-18T21:42:00+00:00', 'cmdb_id': 'shipping', 'kpi_name': 'cpu', 'value': 0.1295520994071247, 'anomaly_flag': False}, {'timestamp': '2024-01-18T21:43:00+00:00', 'cmdb_id': 'shipping', 'kpi_name': 'cpu', 'value': 0.1272823342507293, 'anomaly_flag': False}, {'timestamp': '2024-01-18T21:44:00+00:00', 'cmdb_id': 'shipping', 'kpi_name': 'cpu', 'value': 0.1362946319689071, 'anomaly_flag': False}, {'timestamp': '2024-01-18T21:45:00+00:00', 'cmdb_id': 'shipping', 'kpi_name': 'cpu', 'value': 0.1434131946678357, 'anomaly_flag': False}, {'timestamp': '2024-01-18T21:46:00+00:00', 'cmdb_id': 'shipping', 'kpi_name': 'cpu', 'value': 0.2542800467397994, 'anomaly_flag': False}, {'timestamp': '2024-01-18T21:47:00+00:00', 'cmdb_id': 'shipping', 'kpi_name': 'cpu', 'value': 0.2500713251325637, 'anomaly_flag': False}, {'timestamp': '2024-01-18T21:48:00+00:00', 'cmdb_id': 'shipping', 'kpi_name': 'cpu', 'value': 0.2645162170607527, 'anomaly_flag': False}, {'timestamp': '2024-01-18T21:49:00+00:00', 'cmdb_id': 'shipping', 'kpi_name': 'cpu', 'value': 0.2545435361354792, 'anomaly_flag': False}, {'timestamp': '2024-01-18T21:50:00+00:00', 'cmdb_id': 'shipping', 'kpi_name': 'cpu', 'value': 0.2659320612503345, 'anomaly_flag': False}, {'timestamp': '2024-01-18T21:51:00+00:00', 'cmdb_id': 'shipping', 'kpi_name': 'cpu', 'value': 0.2469765233659548, 'anomaly_flag': False}, {'timestamp': '2024-01-18T21:52:00+00:00', 'cmdb_id': 'shipping', 'kpi_name': 'cpu', 'value': 0.2765360004428789, 'anomaly_flag': False}, {'timestamp': '2024-01-18T21:53:00+00:00', 'cmdb_id': 'shipping', 'kpi_name': 'cpu', 'value': 0.2726662865477567, 'anomaly_flag': False}, {'timestamp': '2024-01-18T21:54:00+00:00', 'cmdb_id': 'shipping', 'kpi_name': 'cpu', 'value': 0.2444382612459148, 'anomaly_flag': False}, {'timestamp': '2024-01-18T21:55:00+00:00', 'cmdb_id': 'shipping', 'kpi_name': 'cpu', 'value': 0.241695300485497, 'anomaly_flag': False}, {'timestamp': '2024-01-18T21:56:00+00:00', 'cmdb_id': 'shipping', 'kpi_name': 'cpu', 'value': 0.2489078750699235, 'anomaly_flag': False}, {'timestamp': '2024-01-18T21:57:00+00:00', 'cmdb_id': 'shipping', 'kpi_name': 'cpu', 'value': 0.2513297344032161, 'anomaly_flag': False}, {'timestamp': '2024-01-18T21:58:00+00:00', 'cmdb_id': 'shipping', 'kpi_name': 'cpu', 'value': 0.2569821872000225, 'anomaly_flag': False}, {'timestamp': '2024-01-18T21:59:00+00:00', 'cmdb_id': 'shipping', 'kpi_name': 'cpu', 'value': 0.2580671940472502, 'anomaly_flag': False}, {'timestamp': '2024-01-18T22:00:00+00:00', 'cmdb_id': 'shipping', 'kpi_name': 'cpu', 'value': 0.684149678681423, 'anomaly_flag': True}, {'timestamp': '2024-01-18T22:01:00+00:00', 'cmdb_id': 'shipping', 'kpi_name': 'cpu', 'value': 0.3113659877697962, 'anomaly_flag': True}, {'timestamp': '2024-01-18T22:02:00+00:00', 'cmdb_id': 'shipping', 'kpi_name': 'cpu', 'value': 0.2332616929123586, 'anomaly_flag': False}, {'timestamp': '2024-01-18T22:03:00+00:00', 'cmdb_id': 'shipping', 'kpi_name': 'cpu', 'value': 0.2426717833421412, 'anomaly_flag': False}, {'timestamp': '2024-01-18T22:04:00+00:00', 'cmdb_id': 'shipping', 'kpi_name': 'cpu', 'value': 0.2488958016420815, 'anomaly_flag': False}, {'timestamp': '2024-01-18T22:05:00+00:00', 'cmdb_id': 'shipping', 'kpi_name': 'cpu', 'value': 0.2615021480146387, 'anomaly_flag': False}, {'timestamp': '2024-01-18T22:06:00+00:00', 'cmdb_id': 'shipping', 'kpi_name': 'cpu', 'value': 0.2685465409517454, 'anomaly_flag': False}, {'timestamp': '2024-01-18T21:44:00+00:00', 'cmdb_id': 'front-end', 'kpi_name': 'cpu', 'value': 2.231009033851389, 'anomaly_flag': False}, {'timestamp': '2024-01-18T21:45:00+00:00', 'cmdb_id': 'front-end', 'kpi_name': 'cpu', 'value': 3.158233182625364, 'anomaly_flag': False}, {'timestamp': '2024-01-18T21:46:00+00:00', 'cmdb_id': 'front-end', 'kpi_name': 'cpu', 'value': 5.388896487069748, 'anomaly_flag': True}, {'timestamp': '2024-01-18T21:47:00+00:00', 'cmdb_id': 'front-end', 'kpi_name': 'cpu', 'value': 4.679349146922674, 'anomaly_flag': True}, {'timestamp': '2024-01-18T21:48:00+00:00', 'cmdb_id': 'front-end', 'kpi_name': 'cpu', 'value': 4.499596529197334, 'anomaly_flag': False}, {'timestamp': '2024-01-18T21:49:00+00:00', 'cmdb_id': 'front-end', 'kpi_name': 'cpu', 'value': 4.631309792889102, 'anomaly_flag': False}, {'timestamp': '2024-01-18T21:50:00+00:00', 'cmdb_id': 'front-end', 'kpi_name': 'cpu', 'value': 4.56771688972556, 'anomaly_flag': False}, {'timestamp': '2024-01-18T21:51:00+00:00', 'cmdb_id': 'front-end', 'kpi_name': 'cpu', 'value': 4.256026961233309, 'anomaly_flag': False}, {'timestamp': '2024-01-18T21:52:00+00:00', 'cmdb_id': 'front-end', 'kpi_name': 'cpu', 'value': 4.321412656184213, 'anomaly_flag': False}, {'timestamp': '2024-01-18T21:53:00+00:00', 'cmdb_id': 'front-end', 'kpi_name': 'cpu', 'value': 4.062849704864357, 'anomaly_flag': False}, {'timestamp': '2024-01-18T21:54:00+00:00', 'cmdb_id': 'front-end', 'kpi_name': 'cpu', 'value': 4.139431624373324, 'anomaly_flag': False}, {'timestamp': '2024-01-18T21:55:00+00:00', 'cmdb_id': 'front-end', 'kpi_name': 'cpu', 'value': 3.756273091203709, 'anomaly_flag': False}, {'timestamp': '2024-01-18T21:56:00+00:00', 'cmdb_id': 'front-end', 'kpi_name': 'cpu', 'value': 4.335494280333844, 'anomaly_flag': False}, {'timestamp': '2024-01-18T21:57:00+00:00', 'cmdb_id': 'front-end', 'kpi_name': 'cpu', 'value': 4.225959286618619, 'anomaly_flag': False}, {'timestamp': '2024-01-18T21:58:00+00:00', 'cmdb_id': 'front-end', 'kpi_name': 'cpu', 'value': 4.367553506026466, 'anomaly_flag': False}, {'timestamp': '2024-01-18T21:59:00+00:00', 'cmdb_id': 'front-end', 'kpi_name': 'cpu', 'value': 4.522626050184254, 'anomaly_flag': False}, {'timestamp': '2024-01-18T22:00:00+00:00', 'cmdb_id': 'front-end', 'kpi_name': 'cpu', 'value': 4.173554386575306, 'anomaly_flag': False}, {'timestamp': '2024-01-18T22:01:00+00:00', 'cmdb_id': 'front-end', 'kpi_name': 'cpu', 'value': 4.140426589195695, 'anomaly_flag': False}, {'timestamp': '2024-01-18T22:02:00+00:00', 'cmdb_id': 'front-end', 'kpi_name': 'cpu', 'value': 3.82520796358181, 'anomaly_flag': False}, {'timestamp': '2024-01-18T22:03:00+00:00', 'cmdb_id': 'front-end', 'kpi_name': 'cpu', 'value': 4.194166246305022, 'anomaly_flag': False}, {'timestamp': '2024-01-18T22:04:00+00:00', 'cmdb_id': 'front-end', 'kpi_name': 'cpu', 'value': 4.310796405066761, 'anomaly_flag': False}, {'timestamp': '2024-01-18T22:05:00+00:00', 'cmdb_id': 'front-end', 'kpi_name': 'cpu', 'value': 4.288212383888296, 'anomaly_flag': False}, {'timestamp': '2024-01-18T22:06:00+00:00', 'cmdb_id': 'front-end', 'kpi_name': 'cpu', 'value': 4.436549026453203, 'anomaly_flag': False}, {'timestamp': '2024-01-18T21:45:00+00:00', 'cmdb_id': 'user', 'kpi_name': 'latency-50', 'value': 0.0034259836066439, 'anomaly_flag': False}, {'timestamp': '2024-01-18T21:46:00+00:00', 'cmdb_id': 'user', 'kpi_name': 'latency-50', 'value': 0.0044647189695562, 'anomaly_flag': False}, {'timestamp': '2024-01-18T21:47:00+00:00', 'cmdb_id': 'user', 'kpi_name': 'latency-50', 'value': 0.0043782640004229, 'anomaly_flag': False}, {'timestamp': '2024-01-18T21:48:00+00:00', 'cmdb_id': 'user', 'kpi_name': 'latency-50', 'value': 0.0042885302819167, 'anomaly_flag': False}, {'timestamp': '2024-01-18T21:49:00+00:00', 'cmdb_id': 'user', 'kpi_name': 'latency-50', 'value': 0.0047188517650096, 'anomaly_flag': False}, {'timestamp': '2024-01-18T21:50:00+00:00', 'cmdb_id': 'user', 'kpi_name': 'latency-50', 'value': 0.0044341346314853, 'anomaly_flag': False}, {'timestamp': '2024-01-18T21:51:00+00:00', 'cmdb_id': 'user', 'kpi_name': 'latency-50', 'value': 0.0043484678881919, 'anomaly_flag': False}, {'timestamp': '2024-01-18T21:52:00+00:00', 'cmdb_id': 'user', 'kpi_name': 'latency-50', 'value': 0.0043956466726999, 'anomaly_flag': False}, {'timestamp': '2024-01-18T21:53:00+00:00', 'cmdb_id': 'user', 'kpi_name': 'latency-50', 'value': 0.0041791323306039, 'anomaly_flag': False}, {'timestamp': '2024-01-18T21:54:00+00:00', 'cmdb_id': 'user', 'kpi_name': 'latency-50', 'value': 0.0043034407051414, 'anomaly_flag': False}, {'timestamp': '2024-01-18T21:55:00+00:00', 'cmdb_id': 'user', 'kpi_name': 'latency-50', 'value': 0.0142709423818319, 'anomaly_flag': False}, {'timestamp': '2024-01-18T21:56:00+00:00', 'cmdb_id': 'user', 'kpi_name': 'latency-50', 'value': 0.0298425907405702, 'anomaly_flag': False}, {'timestamp': '2024-01-18T21:57:00+00:00', 'cmdb_id': 'user', 'kpi_name': 'latency-50', 'value': 0.0250093301810138, 'anomaly_flag': False}, {'timestamp': '2024-01-18T21:58:00+00:00', 'cmdb_id': 'user', 'kpi_name': 'latency-50', 'value': 0.0201269625347433, 'anomaly_flag': False}, {'timestamp': '2024-01-18T21:59:00+00:00', 'cmdb_id': 'user', 'kpi_name': 'latency-50', 'value': 0.0229953573827339, 'anomaly_flag': False}, {'timestamp': '2024-01-18T22:00:00+00:00', 'cmdb_id': 'user', 'kpi_name': 'latency-50', 'value': 0.0227101894731568, 'anomaly_flag': False}, {'timestamp': '2024-01-18T22:01:00+00:00', 'cmdb_id': 'user', 'kpi_name': 'latency-50', 'value': 0.0245028391098486, 'anomaly_flag': False}, {'timestamp': '2024-01-18T22:02:00+00:00', 'cmdb_id': 'user', 'kpi_name': 'latency-50', 'value': 0.0349139764783434, 'anomaly_flag': True}, {'timestamp': '2024-01-18T22:03:00+00:00', 'cmdb_id': 'user', 'kpi_name': 'latency-50', 'value': 0.0319090546213808, 'anomaly_flag': True}, {'timestamp': '2024-01-18T22:04:00+00:00', 'cmdb_id': 'user', 'kpi_name': 'latency-50', 'value': 0.0261243528713637, 'anomaly_flag': False}, {'timestamp': '2024-01-18T22:05:00+00:00', 'cmdb_id': 'user', 'kpi_name': 'latency-50', 'value': 0.0303690290952238, 'anomaly_flag': False}, {'timestamp': '2024-01-18T22:06:00+00:00', 'cmdb_id': 'user', 'kpi_name': 'latency-50', 'value': 0.0287913671981643, 'anomaly_flag': False}], [{'cmdb_id': 'shipping', 'kpi_name': 'cpu', 'global_p95': 0.3043999903044126, 'total_points_in_window': 25, 'anomaly_point_count_in_window': 2, 'earliest_anomaly_timestamp_in_window': '2024-01-18T22:00:00+00:00', 'max_value_in_window': 0.684149678681423, 'max_over_p95_ratio': 2.247535152669502, 'mean_value_in_window': 0.254955137709445}, {'cmdb_id': 'front-end', 'kpi_name': 'cpu', 'global_p95': 4.674545211519317, 'total_points_in_window': 23, 'anomaly_point_count_in_window': 2, 'earliest_anomaly_timestamp_in_window': '2024-01-18T21:46:00+00:00', 'max_value_in_window': 5.388896487069748, 'max_over_p95_ratio': 1.1528172780937236, 'mean_value_in_window': 4.196202227146493}, {'cmdb_id': 'user', 'kpi_name': 'latency-50', 'global_p95': 0.03183205334507295, 'total_points_in_window': 22, 'anomaly_point_count_in_window': 2, 'earliest_anomaly_timestamp_in_window': '2024-01-18T22:02:00+00:00', 'max_value_in_window': 0.0349139764783434, 'max_over_p95_ratio': 1.0968182322346942, 'mean_value_in_window': 0.016113780132729374}], [{'timestamp': '2024-01-18T21:44:00+00:00', 'cmdb_id': 'front-end', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T21:45:00+00:00', 'cmdb_id': 'front-end', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T21:46:00+00:00', 'cmdb_id': 'front-end', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T21:47:00+00:00', 'cmdb_id': 'front-end', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T21:48:00+00:00', 'cmdb_id': 'front-end', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T21:49:00+00:00', 'cmdb_id': 'front-end', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T21:50:00+00:00', 'cmdb_id': 'front-end', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T21:51:00+00:00', 'cmdb_id': 'front-end', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T21:52:00+00:00', 'cmdb_id': 'front-end', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T21:53:00+00:00', 'cmdb_id': 'front-end', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T21:54:00+00:00', 'cmdb_id': 'front-end', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T21:55:00+00:00', 'cmdb_id': 'front-end', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T21:56:00+00:00', 'cmdb_id': 'front-end', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T21:57:00+00:00', 'cmdb_id': 'front-end', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T21:58:00+00:00', 'cmdb_id': 'front-end', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T21:59:00+00:00', 'cmdb_id': 'front-end', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T22:00:00+00:00', 'cmdb_id': 'front-end', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T22:01:00+00:00', 'cmdb_id': 'front-end', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T22:02:00+00:00', 'cmdb_id': 'front-end', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T22:03:00+00:00', 'cmdb_id': 'front-end', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T22:04:00+00:00', 'cmdb_id': 'front-end', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T22:05:00+00:00', 'cmdb_id': 'front-end', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T22:06:00+00:00', 'cmdb_id': 'front-end', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T21:44:00+00:00', 'cmdb_id': 'front-end', 'log_name': 'log.row_count', 'value': 11.0}, {'timestamp': '2024-01-18T21:45:00+00:00', 'cmdb_id': 'front-end', 'log_name': 'log.row_count', 'value': 1429.0}, {'timestamp': '2024-01-18T21:46:00+00:00', 'cmdb_id': 'front-end', 'log_name': 'log.row_count', 'value': 1750.0}, {'timestamp': '2024-01-18T21:47:00+00:00', 'cmdb_id': 'front-end', 'log_name': 'log.row_count', 'value': 2035.0}, {'timestamp': '2024-01-18T21:48:00+00:00', 'cmdb_id': 'front-end', 'log_name': 'log.row_count', 'value': 1977.0}, {'timestamp': '2024-01-18T21:49:00+00:00', 'cmdb_id': 'front-end', 'log_name': 'log.row_count', 'value': 1957.0}, {'timestamp': '2024-01-18T21:50:00+00:00', 'cmdb_id': 'front-end', 'log_name': 'log.row_count', 'value': 1982.0}, {'timestamp': '2024-01-18T21:51:00+00:00', 'cmdb_id': 'front-end', 'log_name': 'log.row_count', 'value': 1933.0}, {'timestamp': '2024-01-18T21:52:00+00:00', 'cmdb_id': 'front-end', 'log_name': 'log.row_count', 'value': 1923.0}, {'timestamp': '2024-01-18T21:53:00+00:00', 'cmdb_id': 'front-end', 'log_name': 'log.row_count', 'value': 1916.0}, {'timestamp': '2024-01-18T21:54:00+00:00', 'cmdb_id': 'front-end', 'log_name': 'log.row_count', 'value': 1900.0}, {'timestamp': '2024-01-18T21:55:00+00:00', 'cmdb_id': 'front-end', 'log_name': 'log.row_count', 'value': 1940.0}, {'timestamp': '2024-01-18T21:56:00+00:00', 'cmdb_id': 'front-end', 'log_name': 'log.row_count', 'value': 1944.0}, {'timestamp': '2024-01-18T21:57:00+00:00', 'cmdb_id': 'front-end', 'log_name': 'log.row_count', 'value': 1859.0}, {'timestamp': '2024-01-18T21:58:00+00:00', 'cmdb_id': 'front-end', 'log_name': 'log.row_count', 'value': 2009.0}, {'timestamp': '2024-01-18T21:59:00+00:00', 'cmdb_id': 'front-end', 'log_name': 'log.row_count', 'value': 1877.0}, {'timestamp': '2024-01-18T22:00:00+00:00', 'cmdb_id': 'front-end', 'log_name': 'log.row_count', 'value': 2006.0}, {'timestamp': '2024-01-18T22:01:00+00:00', 'cmdb_id': 'front-end', 'log_name': 'log.row_count', 'value': 1924.0}, {'timestamp': '2024-01-18T22:02:00+00:00', 'cmdb_id': 'front-end', 'log_name': 'log.row_count', 'value': 1868.0}, {'timestamp': '2024-01-18T22:03:00+00:00', 'cmdb_id': 'front-end', 'log_name': 'log.row_count', 'value': 1906.0}, {'timestamp': '2024-01-18T22:04:00+00:00', 'cmdb_id': 'front-end', 'log_name': 'log.row_count', 'value': 1982.0}, {'timestamp': '2024-01-18T22:05:00+00:00', 'cmdb_id': 'front-end', 'log_name': 'log.row_count', 'value': 1903.0}, {'timestamp': '2024-01-18T22:06:00+00:00', 'cmdb_id': 'front-end', 'log_name': 'log.row_count', 'value': 1549.0}, {'timestamp': '2024-01-18T21:45:00+00:00', 'cmdb_id': 'shipping', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T21:46:00+00:00', 'cmdb_id': 'shipping', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T21:47:00+00:00', 'cmdb_id': 'shipping', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T21:48:00+00:00', 'cmdb_id': 'shipping', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T21:49:00+00:00', 'cmdb_id': 'shipping', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T21:50:00+00:00', 'cmdb_id': 'shipping', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T21:51:00+00:00', 'cmdb_id': 'shipping', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T21:52:00+00:00', 'cmdb_id': 'shipping', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T21:53:00+00:00', 'cmdb_id': 'shipping', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T21:54:00+00:00', 'cmdb_id': 'shipping', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T21:55:00+00:00', 'cmdb_id': 'shipping', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T21:56:00+00:00', 'cmdb_id': 'shipping', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T21:57:00+00:00', 'cmdb_id': 'shipping', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T21:58:00+00:00', 'cmdb_id': 'shipping', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T21:59:00+00:00', 'cmdb_id': 'shipping', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T22:00:00+00:00', 'cmdb_id': 'shipping', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T22:01:00+00:00', 'cmdb_id': 'shipping', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T22:02:00+00:00', 'cmdb_id': 'shipping', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T22:03:00+00:00', 'cmdb_id': 'shipping', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T22:04:00+00:00', 'cmdb_id': 'shipping', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T22:05:00+00:00', 'cmdb_id': 'shipping', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T22:06:00+00:00', 'cmdb_id': 'shipping', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T21:45:00+00:00', 'cmdb_id': 'shipping', 'log_name': 'log.row_count', 'value': 33.0}, {'timestamp': '2024-01-18T21:46:00+00:00', 'cmdb_id': 'shipping', 'log_name': 'log.row_count', 'value': 56.0}, {'timestamp': '2024-01-18T21:47:00+00:00', 'cmdb_id': 'shipping', 'log_name': 'log.row_count', 'value': 65.0}, {'timestamp': '2024-01-18T21:48:00+00:00', 'cmdb_id': 'shipping', 'log_name': 'log.row_count', 'value': 59.0}, {'timestamp': '2024-01-18T21:49:00+00:00', 'cmdb_id': 'shipping', 'log_name': 'log.row_count', 'value': 60.0}, {'timestamp': '2024-01-18T21:50:00+00:00', 'cmdb_id': 'shipping', 'log_name': 'log.row_count', 'value': 65.0}, {'timestamp': '2024-01-18T21:51:00+00:00', 'cmdb_id': 'shipping', 'log_name': 'log.row_count', 'value': 58.0}, {'timestamp': '2024-01-18T21:52:00+00:00', 'cmdb_id': 'shipping', 'log_name': 'log.row_count', 'value': 60.0}, {'timestamp': '2024-01-18T21:53:00+00:00', 'cmdb_id': 'shipping', 'log_name': 'log.row_count', 'value': 61.0}, {'timestamp': '2024-01-18T21:54:00+00:00', 'cmdb_id': 'shipping', 'log_name': 'log.row_count', 'value': 59.0}, {'timestamp': '2024-01-18T21:55:00+00:00', 'cmdb_id': 'shipping', 'log_name': 'log.row_count', 'value': 56.0}, {'timestamp': '2024-01-18T21:56:00+00:00', 'cmdb_id': 'shipping', 'log_name': 'log.row_count', 'value': 70.0}, {'timestamp': '2024-01-18T21:57:00+00:00', 'cmdb_id': 'shipping', 'log_name': 'log.row_count', 'value': 53.0}, {'timestamp': '2024-01-18T21:58:00+00:00', 'cmdb_id': 'shipping', 'log_name': 'log.row_count', 'value': 66.0}, {'timestamp': '2024-01-18T21:59:00+00:00', 'cmdb_id': 'shipping', 'log_name': 'log.row_count', 'value': 56.0}, {'timestamp': '2024-01-18T22:00:00+00:00', 'cmdb_id': 'shipping', 'log_name': 'log.row_count', 'value': 61.0}, {'timestamp': '2024-01-18T22:01:00+00:00', 'cmdb_id': 'shipping', 'log_name': 'log.row_count', 'value': 62.0}, {'timestamp': '2024-01-18T22:02:00+00:00', 'cmdb_id': 'shipping', 'log_name': 'log.row_count', 'value': 59.0}, {'timestamp': '2024-01-18T22:03:00+00:00', 'cmdb_id': 'shipping', 'log_name': 'log.row_count', 'value': 56.0}, {'timestamp': '2024-01-18T22:04:00+00:00', 'cmdb_id': 'shipping', 'log_name': 'log.row_count', 'value': 64.0}, {'timestamp': '2024-01-18T22:05:00+00:00', 'cmdb_id': 'shipping', 'log_name': 'log.row_count', 'value': 57.0}, {'timestamp': '2024-01-18T22:06:00+00:00', 'cmdb_id': 'shipping', 'log_name': 'log.row_count', 'value': 50.0}, {'timestamp': '2024-01-18T21:42:00+00:00', 'cmdb_id': 'user', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T21:43:00+00:00', 'cmdb_id': 'user', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T21:44:00+00:00', 'cmdb_id': 'user', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T21:45:00+00:00', 'cmdb_id': 'user', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T21:46:00+00:00', 'cmdb_id': 'user', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T21:47:00+00:00', 'cmdb_id': 'user', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T21:48:00+00:00', 'cmdb_id': 'user', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T21:49:00+00:00', 'cmdb_id': 'user', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T21:50:00+00:00', 'cmdb_id': 'user', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T21:51:00+00:00', 'cmdb_id': 'user', 'log_name': 'log.error_count', 'value': 0.0}], [{'cmdb_id': 'front-end', 'log_name': 'log.error_count', 'total_points_in_window': 23, 'earliest_timestamp_in_window': '2024-01-18T21:44:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00', 'sum_value_in_window': 0.0, 'max_value_in_window': 0.0}, {'cmdb_id': 'front-end', 'log_name': 'log.row_count', 'total_points_in_window': 23, 'earliest_timestamp_in_window': '2024-01-18T21:44:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00', 'sum_value_in_window': 41580.0, 'max_value_in_window': 2035.0}, {'cmdb_id': 'shipping', 'log_name': 'log.error_count', 'total_points_in_window': 22, 'earliest_timestamp_in_window': '2024-01-18T21:45:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00', 'sum_value_in_window': 0.0, 'max_value_in_window': 0.0}, {'cmdb_id': 'shipping', 'log_name': 'log.row_count', 'total_points_in_window': 22, 'earliest_timestamp_in_window': '2024-01-18T21:45:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00', 'sum_value_in_window': 1286.0, 'max_value_in_window': 70.0}, {'cmdb_id': 'user', 'log_name': 'log.error_count', 'total_points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00', 'sum_value_in_window': 0.0, 'max_value_in_window': 0.0}, {'cmdb_id': 'user', 'log_name': 'log.row_count', 'total_points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00', 'sum_value_in_window': 12591.0, 'max_value_in_window': 623.0}])
+2026-07-04 09:38:20,565 | DEBUG | Execution finished. Time cost: 0:00:54.923405
+2026-07-04 09:38:39,537 | DEBUG | Brief Answer:
+Summary for the incident window (2024-01-18 21:39:49 → 22:09:49 UTC):
+
+Metric results (global P95 computed from full series; anomalies flagged when value >= P95)
+- shipping / cpu
+  - global_p95 = 0.3044
+  - points in window = 25, anomaly points = 2
+  - earliest anomaly timestamps in window: 2024-01-18T22:00:00Z and 2024-01-18T22:01:00Z
+  - max value = 0.68415 (≈ 2.25× P95), mean ≈ 0.255
+  - Interpretation: a short but strong CPU spike around 22:00 UTC.
+
+- front-end / cpu
+  - global_p95 = 4.6745
+  - points in window = 23, anomaly points = 2
+  - earliest anomaly timestamps in window: 2024-01-18T21:46:00Z and 2024-01-18T21:47:00Z
+  - max value = 5.3889 (≈ 1.15× P95), mean ≈ 4.20
+  - Interpretation: a brief CPU increase on front-end around 21:46 UTC.
+
+- user / latency-50
+  - global_p95 = 0.03183
+  - points in window = 22, anomaly points = 2
+  - earliest anomaly timestamps in window: 2024-01-18T22:02:00Z and 2024-01-18T22:03:00Z
+  - max value = 0.03491 (≈ 1.10× P95), mean ≈ 0.0161
+  - Interpretation: two brief latency spikes for user service ~22:02–22:03 UTC.
+
+Metric rows (selected anomaly timestamps)
+- shipping CPU anomalies: 2024-01-18T22:00:00Z (0.68415), 2024-01-18T22:01:00Z (0.31137).
+- front-end CPU anomalies: 2024-01-18T21:46:00Z (5.3889), 2024-01-18T21:47:00Z (4.6793).
+- user latency-50 anomalies: 2024-01-18T22:02:00Z (0.03491), 2024-01-18T22:03:00Z (0.03191).
+
+Log data (filtered to shipping, front-end, user; log.error_count and log.row_count)
+- front-end
+  - log.error_count: 23 points in-window, all 0 (no error log spikes).
+  - log.row_count: 23 points, earliest 2024-01-18T21:44:00Z → latest 2024-01-18T22:06:00Z, sum = 41,580, max = 2,035 (high request/row counts throughout the window). Notable: front-end row_count is very large around the time of its CPU anomalies (e.g., 1,750 at 21:46).
+- shipping
+  - log.error_count: 22 points, all 0.
+  - log.row_count: 22 points, sum = 1,286, max = 70. At 22:00 shipping row_count = 61 (coincident with shipping CPU spike).
+- user
+  - log.error_count: 25 points, all 0.
+  - log.row_count: 25 points, sum = 12,591, max = 623.
+
+Conclusions and recommended next steps
+- Shipping shows the largest relative spike (≈2.25× P95) at ~22:00 UTC and that spike coincides with elevated shipping row_count at that minute — investigate shipping service CPU usage and workload at 22:00.
+- Front-end CPU had brief spikes at ~21:46 UTC that coincide with very high front-end row_count (thousands) — investigate front-end load and request handling at ~21:46.
+- User latency had two brief spikes ~22:02–22:03 UTC (small absolute increases) — correlate with user row_count and front-end activity.
+- No corresponding log.error_count spikes for these services in the window (error counts are 0), so start by correlating metric spikes with request/row_count load and any traces or application logs (if available) rather than error logs.
+2026-07-04 09:38:39,537 | INFO | --------------------------------------------------------------------------------
+Step[3]
+### Observation:
+Summary for the incident window (2024-01-18 21:39:49 → 22:09:49 UTC):
+
+Metric results (global P95 computed from full series; anomalies flagged when value >= P95)
+- shipping / cpu
+  - global_p95 = 0.3044
+  - points in window = 25, anomaly points = 2
+  - earliest anomaly timestamps in window: 2024-01-18T22:00:00Z and 2024-01-18T22:01:00Z
+  - max value = 0.68415 (≈ 2.25× P95), mean ≈ 0.255
+  - Interpretation: a short but strong CPU spike around 22:00 UTC.
+
+- front-end / cpu
+  - global_p95 = 4.6745
+  - points in window = 23, anomaly points = 2
+  - earliest anomaly timestamps in window: 2024-01-18T21:46:00Z and 2024-01-18T21:47:00Z
+  - max value = 5.3889 (≈ 1.15× P95), mean ≈ 4.20
+  - Interpretation: a brief CPU increase on front-end around 21:46 UTC.
+
+- user / latency-50
+  - global_p95 = 0.03183
+  - points in window = 22, anomaly points = 2
+  - earliest anomaly timestamps in window: 2024-01-18T22:02:00Z and 2024-01-18T22:03:00Z
+  - max value = 0.03491 (≈ 1.10× P95), mean ≈ 0.0161
+  - Interpretation: two brief latency spikes for user service ~22:02–22:03 UTC.
+
+Metric rows (selected anomaly timestamps)
+- shipping CPU anomalies: 2024-01-18T22:00:00Z (0.68415), 2024-01-18T22:01:00Z (0.31137).
+- front-end CPU anomalies: 2024-01-18T21:46:00Z (5.3889), 2024-01-18T21:47:00Z (4.6793).
+- user latency-50 anomalies: 2024-01-18T22:02:00Z (0.03491), 2024-01-18T22:03:00Z (0.03191).
+
+Log data (filtered to shipping, front-end, user; log.error_count and log.row_count)
+- front-end
+  - log.error_count: 23 points in-window, all 0 (no error log spikes).
+  - log.row_count: 23 points, earliest 2024-01-18T21:44:00Z → latest 2024-01-18T22:06:00Z, sum = 41,580, max = 2,035 (high request/row counts throughout the window). Notable: front-end row_count is very large around the time of its CPU anomalies (e.g., 1,750 at 21:46).
+- shipping
+  - log.error_count: 22 points, all 0.
+  - log.row_count: 22 points, sum = 1,286, max = 70. At 22:00 shipping row_count = 61 (coincident with shipping CPU spike).
+- user
+  - log.error_count: 25 points, all 0.
+  - log.row_count: 25 points, sum = 12,591, max = 623.
+
+Conclusions and recommended next steps
+- Shipping shows the largest relative spike (≈2.25× P95) at ~22:00 UTC and that spike coincides with elevated shipping row_count at that minute — investigate shipping service CPU usage and workload at 22:00.
+- Front-end CPU had brief spikes at ~21:46 UTC that coincide with very high front-end row_count (thousands) — investigate front-end load and request handling at ~21:46.
+- User latency had two brief spikes ~22:02–22:03 UTC (small absolute increases) — correlate with user row_count and front-end activity.
+- No corresponding log.error_count spikes for these services in the window (error counts are 0), so start by correlating metric spikes with request/row_count load and any traces or application logs (if available) rather than error logs.
+
+The original code execution output of IPython Kernel is also provided below for reference:
+
+([{'timestamp': '2024-01-18T21:42:00+00:00', 'cmdb_id': 'shipping', 'kpi_name': 'cpu', 'value': 0.1295520994071247, 'anomaly_flag': False}, {'timestamp': '2024-01-18T21:43:00+00:00', 'cmdb_id': 'shipping', 'kpi_name': 'cpu', 'value': 0.1272823342507293, 'anomaly_flag': False}, {'timestamp': '2024-01-18T21:44:00+00:00', 'cmdb_id': 'shipping', 'kpi_name': 'cpu', 'value': 0.1362946319689071, 'anomaly_flag': False}, {'timestamp': '2024-01-18T21:45:00+00:00', 'cmdb_id': 'shipping', 'kpi_name': 'cpu', 'value': 0.1434131946678357, 'anomaly_flag': False}, {'timestamp': '2024-01-18T21:46:00+00:00', 'cmdb_id': 'shipping', 'kpi_name': 'cpu', 'value': 0.2542800467397994, 'anomaly_flag': False}, {'timestamp': '2024-01-18T21:47:00+00:00', 'cmdb_id': 'shipping', 'kpi_name': 'cpu', 'value': 0.2500713251325637, 'anomaly_flag': False}, {'timestamp': '2024-01-18T21:48:00+00:00', 'cmdb_id': 'shipping', 'kpi_name': 'cpu', 'value': 0.2645162170607527, 'anomaly_flag': False}, {'timestamp': '2024-01-18T21:49:00+00:00', 'cmdb_id': 'shipping', 'kpi_name': 'cpu', 'value': 0.2545435361354792, 'anomaly_flag': False}, {'timestamp': '2024-01-18T21:50:00+00:00', 'cmdb_id': 'shipping', 'kpi_name': 'cpu', 'value': 0.2659320612503345, 'anomaly_flag': False}, {'timestamp': '2024-01-18T21:51:00+00:00', 'cmdb_id': 'shipping', 'kpi_name': 'cpu', 'value': 0.2469765233659548, 'anomaly_flag': False}, {'timestamp': '2024-01-18T21:52:00+00:00', 'cmdb_id': 'shipping', 'kpi_name': 'cpu', 'value': 0.2765360004428789, 'anomaly_flag': False}, {'timestamp': '2024-01-18T21:53:00+00:00', 'cmdb_id': 'shipping', 'kpi_name': 'cpu', 'value': 0.2726662865477567, 'anomaly_flag': False}, {'timestamp': '2024-01-18T21:54:00+00:00', 'cmdb_id': 'shipping', 'kpi_name': 'cpu', 'value': 0.2444382612459148, 'anomaly_flag': False}, {'timestamp': '2024-01-18T21:55:00+00:00', 'cmdb_id': 'shipping', 'kpi_name': 'cpu', 'value': 0.241695300485497, 'anomaly_flag': False}, {'timestamp': '2024-01-18T21:56:00+00:00', 'cmdb_id': 'shipping', 'kpi_name': 'cpu', 'value': 0.2489078750699235, 'anomaly_flag': False}, {'timestamp': '2024-01-18T21:57:00+00:00', 'cmdb_id': 'shipping', 'kpi_name': 'cpu', 'value': 0.2513297344032161, 'anomaly_flag': False}, {'timestamp': '2024-01-18T21:58:00+00:00', 'cmdb_id': 'shipping', 'kpi_name': 'cpu', 'value': 0.2569821872000225, 'anomaly_flag': False}, {'timestamp': '2024-01-18T21:59:00+00:00', 'cmdb_id': 'shipping', 'kpi_name': 'cpu', 'value': 0.2580671940472502, 'anomaly_flag': False}, {'timestamp': '2024-01-18T22:00:00+00:00', 'cmdb_id': 'shipping', 'kpi_name': 'cpu', 'value': 0.684149678681423, 'anomaly_flag': True}, {'timestamp': '2024-01-18T22:01:00+00:00', 'cmdb_id': 'shipping', 'kpi_name': 'cpu', 'value': 0.3113659877697962, 'anomaly_flag': True}, {'timestamp': '2024-01-18T22:02:00+00:00', 'cmdb_id': 'shipping', 'kpi_name': 'cpu', 'value': 0.2332616929123586, 'anomaly_flag': False}, {'timestamp': '2024-01-18T22:03:00+00:00', 'cmdb_id': 'shipping', 'kpi_name': 'cpu', 'value': 0.2426717833421412, 'anomaly_flag': False}, {'timestamp': '2024-01-18T22:04:00+00:00', 'cmdb_id': 'shipping', 'kpi_name': 'cpu', 'value': 0.2488958016420815, 'anomaly_flag': False}, {'timestamp': '2024-01-18T22:05:00+00:00', 'cmdb_id': 'shipping', 'kpi_name': 'cpu', 'value': 0.2615021480146387, 'anomaly_flag': False}, {'timestamp': '2024-01-18T22:06:00+00:00', 'cmdb_id': 'shipping', 'kpi_name': 'cpu', 'value': 0.2685465409517454, 'anomaly_flag': False}, {'timestamp': '2024-01-18T21:44:00+00:00', 'cmdb_id': 'front-end', 'kpi_name': 'cpu', 'value': 2.231009033851389, 'anomaly_flag': False}, {'timestamp': '2024-01-18T21:45:00+00:00', 'cmdb_id': 'front-end', 'kpi_name': 'cpu', 'value': 3.158233182625364, 'anomaly_flag': False}, {'timestamp': '2024-01-18T21:46:00+00:00', 'cmdb_id': 'front-end', 'kpi_name': 'cpu', 'value': 5.388896487069748, 'anomaly_flag': True}, {'timestamp': '2024-01-18T21:47:00+00:00', 'cmdb_id': 'front-end', 'kpi_name': 'cpu', 'value': 4.679349146922674, 'anomaly_flag': True}, {'timestamp': '2024-01-18T21:48:00+00:00', 'cmdb_id': 'front-end', 'kpi_name': 'cpu', 'value': 4.499596529197334, 'anomaly_flag': False}, {'timestamp': '2024-01-18T21:49:00+00:00', 'cmdb_id': 'front-end', 'kpi_name': 'cpu', 'value': 4.631309792889102, 'anomaly_flag': False}, {'timestamp': '2024-01-18T21:50:00+00:00', 'cmdb_id': 'front-end', 'kpi_name': 'cpu', 'value': 4.56771688972556, 'anomaly_flag': False}, {'timestamp': '2024-01-18T21:51:00+00:00', 'cmdb_id': 'front-end', 'kpi_name': 'cpu', 'value': 4.256026961233309, 'anomaly_flag': False}, {'timestamp': '2024-01-18T21:52:00+00:00', 'cmdb_id': 'front-end', 'kpi_name': 'cpu', 'value': 4.321412656184213, 'anomaly_flag': False}, {'timestamp': '2024-01-18T21:53:00+00:00', 'cmdb_id': 'front-end', 'kpi_name': 'cpu', 'value': 4.062849704864357, 'anomaly_flag': False}, {'timestamp': '2024-01-18T21:54:00+00:00', 'cmdb_id': 'front-end', 'kpi_name': 'cpu', 'value': 4.139431624373324, 'anomaly_flag': False}, {'timestamp': '2024-01-18T21:55:00+00:00', 'cmdb_id': 'front-end', 'kpi_name': 'cpu', 'value': 3.756273091203709, 'anomaly_flag': False}, {'timestamp': '2024-01-18T21:56:00+00:00', 'cmdb_id': 'front-end', 'kpi_name': 'cpu', 'value': 4.335494280333844, 'anomaly_flag': False}, {'timestamp': '2024-01-18T21:57:00+00:00', 'cmdb_id': 'front-end', 'kpi_name': 'cpu', 'value': 4.225959286618619, 'anomaly_flag': False}, {'timestamp': '2024-01-18T21:58:00+00:00', 'cmdb_id': 'front-end', 'kpi_name': 'cpu', 'value': 4.367553506026466, 'anomaly_flag': False}, {'timestamp': '2024-01-18T21:59:00+00:00', 'cmdb_id': 'front-end', 'kpi_name': 'cpu', 'value': 4.522626050184254, 'anomaly_flag': False}, {'timestamp': '2024-01-18T22:00:00+00:00', 'cmdb_id': 'front-end', 'kpi_name': 'cpu', 'value': 4.173554386575306, 'anomaly_flag': False}, {'timestamp': '2024-01-18T22:01:00+00:00', 'cmdb_id': 'front-end', 'kpi_name': 'cpu', 'value': 4.140426589195695, 'anomaly_flag': False}, {'timestamp': '2024-01-18T22:02:00+00:00', 'cmdb_id': 'front-end', 'kpi_name': 'cpu', 'value': 3.82520796358181, 'anomaly_flag': False}, {'timestamp': '2024-01-18T22:03:00+00:00', 'cmdb_id': 'front-end', 'kpi_name': 'cpu', 'value': 4.194166246305022, 'anomaly_flag': False}, {'timestamp': '2024-01-18T22:04:00+00:00', 'cmdb_id': 'front-end', 'kpi_name': 'cpu', 'value': 4.310796405066761, 'anomaly_flag': False}, {'timestamp': '2024-01-18T22:05:00+00:00', 'cmdb_id': 'front-end', 'kpi_name': 'cpu', 'value': 4.288212383888296, 'anomaly_flag': False}, {'timestamp': '2024-01-18T22:06:00+00:00', 'cmdb_id': 'front-end', 'kpi_name': 'cpu', 'value': 4.436549026453203, 'anomaly_flag': False}, {'timestamp': '2024-01-18T21:45:00+00:00', 'cmdb_id': 'user', 'kpi_name': 'latency-50', 'value': 0.0034259836066439, 'anomaly_flag': False}, {'timestamp': '2024-01-18T21:46:00+00:00', 'cmdb_id': 'user', 'kpi_name': 'latency-50', 'value': 0.0044647189695562, 'anomaly_flag': False}, {'timestamp': '2024-01-18T21:47:00+00:00', 'cmdb_id': 'user', 'kpi_name': 'latency-50', 'value': 0.0043782640004229, 'anomaly_flag': False}, {'timestamp': '2024-01-18T21:48:00+00:00', 'cmdb_id': 'user', 'kpi_name': 'latency-50', 'value': 0.0042885302819167, 'anomaly_flag': False}, {'timestamp': '2024-01-18T21:49:00+00:00', 'cmdb_id': 'user', 'kpi_name': 'latency-50', 'value': 0.0047188517650096, 'anomaly_flag': False}, {'timestamp': '2024-01-18T21:50:00+00:00', 'cmdb_id': 'user', 'kpi_name': 'latency-50', 'value': 0.0044341346314853, 'anomaly_flag': False}, {'timestamp': '2024-01-18T21:51:00+00:00', 'cmdb_id': 'user', 'kpi_name': 'latency-50', 'value': 0.0043484678881919, 'anomaly_flag': False}, {'timestamp': '2024-01-18T21:52:00+00:00', 'cmdb_id': 'user', 'kpi_name': 'latency-50', 'value': 0.0043956466726999, 'anomaly_flag': False}, {'timestamp': '2024-01-18T21:53:00+00:00', 'cmdb_id': 'user', 'kpi_name': 'latency-50', 'value': 0.0041791323306039, 'anomaly_flag': False}, {'timestamp': '2024-01-18T21:54:00+00:00', 'cmdb_id': 'user', 'kpi_name': 'latency-50', 'value': 0.0043034407051414, 'anomaly_flag': False}, {'timestamp': '2024-01-18T21:55:00+00:00', 'cmdb_id': 'user', 'kpi_name': 'latency-50', 'value': 0.0142709423818319, 'anomaly_flag': False}, {'timestamp': '2024-01-18T21:56:00+00:00', 'cmdb_id': 'user', 'kpi_name': 'latency-50', 'value': 0.0298425907405702, 'anomaly_flag': False}, {'timestamp': '2024-01-18T21:57:00+00:00', 'cmdb_id': 'user', 'kpi_name': 'latency-50', 'value': 0.0250093301810138, 'anomaly_flag': False}, {'timestamp': '2024-01-18T21:58:00+00:00', 'cmdb_id': 'user', 'kpi_name': 'latency-50', 'value': 0.0201269625347433, 'anomaly_flag': False}, {'timestamp': '2024-01-18T21:59:00+00:00', 'cmdb_id': 'user', 'kpi_name': 'latency-50', 'value': 0.0229953573827339, 'anomaly_flag': False}, {'timestamp': '2024-01-18T22:00:00+00:00', 'cmdb_id': 'user', 'kpi_name': 'latency-50', 'value': 0.0227101894731568, 'anomaly_flag': False}, {'timestamp': '2024-01-18T22:01:00+00:00', 'cmdb_id': 'user', 'kpi_name': 'latency-50', 'value': 0.0245028391098486, 'anomaly_flag': False}, {'timestamp': '2024-01-18T22:02:00+00:00', 'cmdb_id': 'user', 'kpi_name': 'latency-50', 'value': 0.0349139764783434, 'anomaly_flag': True}, {'timestamp': '2024-01-18T22:03:00+00:00', 'cmdb_id': 'user', 'kpi_name': 'latency-50', 'value': 0.0319090546213808, 'anomaly_flag': True}, {'timestamp': '2024-01-18T22:04:00+00:00', 'cmdb_id': 'user', 'kpi_name': 'latency-50', 'value': 0.0261243528713637, 'anomaly_flag': False}, {'timestamp': '2024-01-18T22:05:00+00:00', 'cmdb_id': 'user', 'kpi_name': 'latency-50', 'value': 0.0303690290952238, 'anomaly_flag': False}, {'timestamp': '2024-01-18T22:06:00+00:00', 'cmdb_id': 'user', 'kpi_name': 'latency-50', 'value': 0.0287913671981643, 'anomaly_flag': False}], [{'cmdb_id': 'shipping', 'kpi_name': 'cpu', 'global_p95': 0.3043999903044126, 'total_points_in_window': 25, 'anomaly_point_count_in_window': 2, 'earliest_anomaly_timestamp_in_window': '2024-01-18T22:00:00+00:00', 'max_value_in_window': 0.684149678681423, 'max_over_p95_ratio': 2.247535152669502, 'mean_value_in_window': 0.254955137709445}, {'cmdb_id': 'front-end', 'kpi_name': 'cpu', 'global_p95': 4.674545211519317, 'total_points_in_window': 23, 'anomaly_point_count_in_window': 2, 'earliest_anomaly_timestamp_in_window': '2024-01-18T21:46:00+00:00', 'max_value_in_window': 5.388896487069748, 'max_over_p95_ratio': 1.1528172780937236, 'mean_value_in_window': 4.196202227146493}, {'cmdb_id': 'user', 'kpi_name': 'latency-50', 'global_p95': 0.03183205334507295, 'total_points_in_window': 22, 'anomaly_point_count_in_window': 2, 'earliest_anomaly_timestamp_in_window': '2024-01-18T22:02:00+00:00', 'max_value_in_window': 0.0349139764783434, 'max_over_p95_ratio': 1.0968182322346942, 'mean_value_in_window': 0.016113780132729374}], [{'timestamp': '2024-01-18T21:44:00+00:00', 'cmdb_id': 'front-end', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T21:45:00+00:00', 'cmdb_id': 'front-end', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T21:46:00+00:00', 'cmdb_id': 'front-end', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T21:47:00+00:00', 'cmdb_id': 'front-end', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T21:48:00+00:00', 'cmdb_id': 'front-end', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T21:49:00+00:00', 'cmdb_id': 'front-end', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T21:50:00+00:00', 'cmdb_id': 'front-end', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T21:51:00+00:00', 'cmdb_id': 'front-end', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T21:52:00+00:00', 'cmdb_id': 'front-end', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T21:53:00+00:00', 'cmdb_id': 'front-end', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T21:54:00+00:00', 'cmdb_id': 'front-end', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T21:55:00+00:00', 'cmdb_id': 'front-end', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T21:56:00+00:00', 'cmdb_id': 'front-end', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T21:57:00+00:00', 'cmdb_id': 'front-end', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T21:58:00+00:00', 'cmdb_id': 'front-end', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T21:59:00+00:00', 'cmdb_id': 'front-end', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T22:00:00+00:00', 'cmdb_id': 'front-end', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T22:01:00+00:00', 'cmdb_id': 'front-end', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T22:02:00+00:00', 'cmdb_id': 'front-end', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T22:03:00+00:00', 'cmdb_id': 'front-end', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T22:04:00+00:00', 'cmdb_id': 'front-end', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T22:05:00+00:00', 'cmdb_id': 'front-end', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T22:06:00+00:00', 'cmdb_id': 'front-end', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T21:44:00+00:00', 'cmdb_id': 'front-end', 'log_name': 'log.row_count', 'value': 11.0}, {'timestamp': '2024-01-18T21:45:00+00:00', 'cmdb_id': 'front-end', 'log_name': 'log.row_count', 'value': 1429.0}, {'timestamp': '2024-01-18T21:46:00+00:00', 'cmdb_id': 'front-end', 'log_name': 'log.row_count', 'value': 1750.0}, {'timestamp': '2024-01-18T21:47:00+00:00', 'cmdb_id': 'front-end', 'log_name': 'log.row_count', 'value': 2035.0}, {'timestamp': '2024-01-18T21:48:00+00:00', 'cmdb_id': 'front-end', 'log_name': 'log.row_count', 'value': 1977.0}, {'timestamp': '2024-01-18T21:49:00+00:00', 'cmdb_id': 'front-end', 'log_name': 'log.row_count', 'value': 1957.0}, {'timestamp': '2024-01-18T21:50:00+00:00', 'cmdb_id': 'front-end', 'log_name': 'log.row_count', 'value': 1982.0}, {'timestamp': '2024-01-18T21:51:00+00:00', 'cmdb_id': 'front-end', 'log_name': 'log.row_count', 'value': 1933.0}, {'timestamp': '2024-01-18T21:52:00+00:00', 'cmdb_id': 'front-end', 'log_name': 'log.row_count', 'value': 1923.0}, {'timestamp': '2024-01-18T21:53:00+00:00', 'cmdb_id': 'front-end', 'log_name': 'log.row_count', 'value': 1916.0}, {'timestamp': '2024-01-18T21:54:00+00:00', 'cmdb_id': 'front-end', 'log_name': 'log.row_count', 'value': 1900.0}, {'timestamp': '2024-01-18T21:55:00+00:00', 'cmdb_id': 'front-end', 'log_name': 'log.row_count', 'value': 1940.0}, {'timestamp': '2024-01-18T21:56:00+00:00', 'cmdb_id': 'front-end', 'log_name': 'log.row_count', 'value': 1944.0}, {'timestamp': '2024-01-18T21:57:00+00:00', 'cmdb_id': 'front-end', 'log_name': 'log.row_count', 'value': 1859.0}, {'timestamp': '2024-01-18T21:58:00+00:00', 'cmdb_id': 'front-end', 'log_name': 'log.row_count', 'value': 2009.0}, {'timestamp': '2024-01-18T21:59:00+00:00', 'cmdb_id': 'front-end', 'log_name': 'log.row_count', 'value': 1877.0}, {'timestamp': '2024-01-18T22:00:00+00:00', 'cmdb_id': 'front-end', 'log_name': 'log.row_count', 'value': 2006.0}, {'timestamp': '2024-01-18T22:01:00+00:00', 'cmdb_id': 'front-end', 'log_name': 'log.row_count', 'value': 1924.0}, {'timestamp': '2024-01-18T22:02:00+00:00', 'cmdb_id': 'front-end', 'log_name': 'log.row_count', 'value': 1868.0}, {'timestamp': '2024-01-18T22:03:00+00:00', 'cmdb_id': 'front-end', 'log_name': 'log.row_count', 'value': 1906.0}, {'timestamp': '2024-01-18T22:04:00+00:00', 'cmdb_id': 'front-end', 'log_name': 'log.row_count', 'value': 1982.0}, {'timestamp': '2024-01-18T22:05:00+00:00', 'cmdb_id': 'front-end', 'log_name': 'log.row_count', 'value': 1903.0}, {'timestamp': '2024-01-18T22:06:00+00:00', 'cmdb_id': 'front-end', 'log_name': 'log.row_count', 'value': 1549.0}, {'timestamp': '2024-01-18T21:45:00+00:00', 'cmdb_id': 'shipping', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T21:46:00+00:00', 'cmdb_id': 'shipping', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T21:47:00+00:00', 'cmdb_id': 'shipping', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T21:48:00+00:00', 'cmdb_id': 'shipping', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T21:49:00+00:00', 'cmdb_id': 'shipping', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T21:50:00+00:00', 'cmdb_id': 'shipping', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T21:51:00+00:00', 'cmdb_id': 'shipping', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T21:52:00+00:00', 'cmdb_id': 'shipping', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T21:53:00+00:00', 'cmdb_id': 'shipping', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T21:54:00+00:00', 'cmdb_id': 'shipping', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T21:55:00+00:00', 'cmdb_id': 'shipping', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T21:56:00+00:00', 'cmdb_id': 'shipping', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T21:57:00+00:00', 'cmdb_id': 'shipping', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T21:58:00+00:00', 'cmdb_id': 'shipping', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T21:59:00+00:00', 'cmdb_id': 'shipping', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T22:00:00+00:00', 'cmdb_id': 'shipping', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T22:01:00+00:00', 'cmdb_id': 'shipping', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T22:02:00+00:00', 'cmdb_id': 'shipping', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T22:03:00+00:00', 'cmdb_id': 'shipping', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T22:04:00+00:00', 'cmdb_id': 'shipping', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T22:05:00+00:00', 'cmdb_id': 'shipping', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T22:06:00+00:00', 'cmdb_id': 'shipping', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T21:45:00+00:00', 'cmdb_id': 'shipping', 'log_name': 'log.row_count', 'value': 33.0}, {'timestamp': '2024-01-18T21:46:00+00:00', 'cmdb_id': 'shipping', 'log_name': 'log.row_count', 'value': 56.0}, {'timestamp': '2024-01-18T21:47:00+00:00', 'cmdb_id': 'shipping', 'log_name': 'log.row_count', 'value': 65.0}, {'timestamp': '2024-01-18T21:48:00+00:00', 'cmdb_id': 'shipping', 'log_name': 'log.row_count', 'value': 59.0}, {'timestamp': '2024-01-18T21:49:00+00:00', 'cmdb_id': 'shipping', 'log_name': 'log.row_count', 'value': 60.0}, {'timestamp': '2024-01-18T21:50:00+00:00', 'cmdb_id': 'shipping', 'log_name': 'log.row_count', 'value': 65.0}, {'timestamp': '2024-01-18T21:51:00+00:00', 'cmdb_id': 'shipping', 'log_name': 'log.row_count', 'value': 58.0}, {'timestamp': '2024-01-18T21:52:00+00:00', 'cmdb_id': 'shipping', 'log_name': 'log.row_count', 'value': 60.0}, {'timestamp': '2024-01-18T21:53:00+00:00', 'cmdb_id': 'shipping', 'log_name': 'log.row_count', 'value': 61.0}, {'timestamp': '2024-01-18T21:54:00+00:00', 'cmdb_id': 'shipping', 'log_name': 'log.row_count', 'value': 59.0}, {'timestamp': '2024-01-18T21:55:00+00:00', 'cmdb_id': 'shipping', 'log_name': 'log.row_count', 'value': 56.0}, {'timestamp': '2024-01-18T21:56:00+00:00', 'cmdb_id': 'shipping', 'log_name': 'log.row_count', 'value': 70.0}, {'timestamp': '2024-01-18T21:57:00+00:00', 'cmdb_id': 'shipping', 'log_name': 'log.row_count', 'value': 53.0}, {'timestamp': '2024-01-18T21:58:00+00:00', 'cmdb_id': 'shipping', 'log_name': 'log.row_count', 'value': 66.0}, {'timestamp': '2024-01-18T21:59:00+00:00', 'cmdb_id': 'shipping', 'log_name': 'log.row_count', 'value': 56.0}, {'timestamp': '2024-01-18T22:00:00+00:00', 'cmdb_id': 'shipping', 'log_name': 'log.row_count', 'value': 61.0}, {'timestamp': '2024-01-18T22:01:00+00:00', 'cmdb_id': 'shipping', 'log_name': 'log.row_count', 'value': 62.0}, {'timestamp': '2024-01-18T22:02:00+00:00', 'cmdb_id': 'shipping', 'log_name': 'log.row_count', 'value': 59.0}, {'timestamp': '2024-01-18T22:03:00+00:00', 'cmdb_id': 'shipping', 'log_name': 'log.row_count', 'value': 56.0}, {'timestamp': '2024-01-18T22:04:00+00:00', 'cmdb_id': 'shipping', 'log_name': 'log.row_count', 'value': 64.0}, {'timestamp': '2024-01-18T22:05:00+00:00', 'cmdb_id': 'shipping', 'log_name': 'log.row_count', 'value': 57.0}, {'timestamp': '2024-01-18T22:06:00+00:00', 'cmdb_id': 'shipping', 'log_name': 'log.row_count', 'value': 50.0}, {'timestamp': '2024-01-18T21:42:00+00:00', 'cmdb_id': 'user', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T21:43:00+00:00', 'cmdb_id': 'user', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T21:44:00+00:00', 'cmdb_id': 'user', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T21:45:00+00:00', 'cmdb_id': 'user', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T21:46:00+00:00', 'cmdb_id': 'user', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T21:47:00+00:00', 'cmdb_id': 'user', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T21:48:00+00:00', 'cmdb_id': 'user', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T21:49:00+00:00', 'cmdb_id': 'user', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T21:50:00+00:00', 'cmdb_id': 'user', 'log_name': 'log.error_count', 'value': 0.0}, {'timestamp': '2024-01-18T21:51:00+00:00', 'cmdb_id': 'user', 'log_name': 'log.error_count', 'value': 0.0}], [{'cmdb_id': 'front-end', 'log_name': 'log.error_count', 'total_points_in_window': 23, 'earliest_timestamp_in_window': '2024-01-18T21:44:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00', 'sum_value_in_window': 0.0, 'max_value_in_window': 0.0}, {'cmdb_id': 'front-end', 'log_name': 'log.row_count', 'total_points_in_window': 23, 'earliest_timestamp_in_window': '2024-01-18T21:44:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00', 'sum_value_in_window': 41580.0, 'max_value_in_window': 2035.0}, {'cmdb_id': 'shipping', 'log_name': 'log.error_count', 'total_points_in_window': 22, 'earliest_timestamp_in_window': '2024-01-18T21:45:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00', 'sum_value_in_window': 0.0, 'max_value_in_window': 0.0}, {'cmdb_id': 'shipping', 'log_name': 'log.row_count', 'total_points_in_window': 22, 'earliest_timestamp_in_window': '2024-01-18T21:45:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00', 'sum_value_in_window': 1286.0, 'max_value_in_window': 70.0}, {'cmdb_id': 'user', 'log_name': 'log.error_count', 'total_points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00', 'sum_value_in_window': 0.0, 'max_value_in_window': 0.0}, {'cmdb_id': 'user', 'log_name': 'log.row_count', 'total_points_in_window': 25, 'earliest_timestamp_in_window': '2024-01-18T21:42:00+00:00', 'latest_timestamp_in_window': '2024-01-18T22:06:00+00:00', 'sum_value_in_window': 12591.0, 'max_value_in_window': 623.0}])
+--------------------------------------------------------------------------------
+2026-07-04 09:38:53,375 | DEBUG | Raw Response:
+{
+    "analysis": "We ran the full workflow: preprocessing -> anomaly detection -> focused metric + log correlation for candidates. Key facts from the executions: (1) No trace telemetry and no error_log entries are available to use. (2) Many long 'anomalies' were artifacts where value == global P95 or global P95 == 0 (socket/error/diskio series) and are low priority. (3) Three meaningful, time-localized anomalies were identified in the window: shipping.cpu (strong short spike), front-end.cpu (brief spike during very high request volume), and user latency-50 (two small spikes). Detailed evidence: shipping.cpu breached its global P95 at 22:00–22:01 UTC with max value ≈0.684 (≈2.25× global P95) and coincident shipping log.row_count at 22:00 = 61 (elevated workload). front-end.cpu spikes at 21:46–21:47 coincide with very large front-end row_count values (≈1.7k–2.0k/min) across the window. user latency-50 spikes at 22:02–22:03 are small in magnitude (≈1.10×P95) and follow the shipping spike. Applying the failure-diagnosis rules: when a single component-KPI has a distinct fault (consecutive breach with significant deviation) it is the root cause. Shipping.cpu shows the largest relative deviation (>100% above P95) and a clear temporal coincidence with increased workload in shipping logs, while other anomalies are smaller or likely baseline artifacts. Therefore shipping service CPU resource contention at ~22:00 UTC is the most probable root cause. Trace/log evidence to further localize (e.g., downstream affected service) is not available, but user latency increase shortly after aligns with a shipping CPU spike and elevated row_count.\n",
+    "completed": "True",
+    "instruction": "Final diagnosis summary (incident window 2024-01-18 21:39:49 → 2024-01-18 22:09:49 UTC):\nRoot-cause service/component: shipping\nFailure reason: high CPU usage (short, significant CPU spike)\nEarliest root-cause occurrence: 2024-01-18T22:00:00Z (shipping.cpu breached global P95; max ≈0.684 ≈2.25×P95)\nSupporting evidence:\n- shipping.cpu: two consecutive anomaly minutes at 22:00–22:01 UTC; max_over_p95_ratio ≈2.25; mean before/after lower, indicating a sharp spike.\n- shipping log.row_count at 22:00 = 61 (elevated workload at the same minute), supporting a workload-driven CPU spike.\n- front-end experienced a separate earlier CPU spike (21:46) coincident with very high front-end row_count, but its relative deviation is smaller and temporally separate; treat as contributing load but not the primary root cause for the 22:00 incident.\n- No trace telemetry and no error_log entries were available to further confirm propagation; log.error_count is 0 for these services in-window.\nRecommended actions:\n1) Investigate shipping service at ~22:00 UTC: check application logs around that minute for long-running requests, thread/worker exhaustion, or CPU-heavy operations.\n2) If shipping is CPU-bound under load, consider horizontal scaling (add replicas) or throttling/queueing of requests to shipping to prevent transient overloads.\n3) Review recent deployments or configuration changes to shipping that could increase CPU per-request cost.\n4) Correlate with any detailed application logs or traces (if enabled) to identify the exact operation causing CPU consumption.\n\nThis is the most likely root cause based on available metrics and logs; further confirmation requires traces or application logs from shipping around 22:00 UTC."
+}
+2026-07-04 09:38:53,375 | INFO | --------------------------------------------------------------------------------
+### Step[4]
+Analysis: We ran the full workflow: preprocessing -> anomaly detection -> focused metric + log correlation for candidates. Key facts from the executions: (1) No trace telemetry and no error_log entries are available to use. (2) Many long 'anomalies' were artifacts where value == global P95 or global P95 == 0 (socket/error/diskio series) and are low priority. (3) Three meaningful, time-localized anomalies were identified in the window: shipping.cpu (strong short spike), front-end.cpu (brief spike during very high request volume), and user latency-50 (two small spikes). Detailed evidence: shipping.cpu breached its global P95 at 22:00–22:01 UTC with max value ≈0.684 (≈2.25× global P95) and coincident shipping log.row_count at 22:00 = 61 (elevated workload). front-end.cpu spikes at 21:46–21:47 coincide with very large front-end row_count values (≈1.7k–2.0k/min) across the window. user latency-50 spikes at 22:02–22:03 are small in magnitude (≈1.10×P95) and follow the shipping spike. Applying the failure-diagnosis rules: when a single component-KPI has a distinct fault (consecutive breach with significant deviation) it is the root cause. Shipping.cpu shows the largest relative deviation (>100% above P95) and a clear temporal coincidence with increased workload in shipping logs, while other anomalies are smaller or likely baseline artifacts. Therefore shipping service CPU resource contention at ~22:00 UTC is the most probable root cause. Trace/log evidence to further localize (e.g., downstream affected service) is not available, but user latency increase shortly after aligns with a shipping CPU spike and elevated row_count.
+
+Instruction: Final diagnosis summary (incident window 2024-01-18 21:39:49 → 2024-01-18 22:09:49 UTC):
+Root-cause service/component: shipping
+Failure reason: high CPU usage (short, significant CPU spike)
+Earliest root-cause occurrence: 2024-01-18T22:00:00Z (shipping.cpu breached global P95; max ≈0.684 ≈2.25×P95)
+Supporting evidence:
+- shipping.cpu: two consecutive anomaly minutes at 22:00–22:01 UTC; max_over_p95_ratio ≈2.25; mean before/after lower, indicating a sharp spike.
+- shipping log.row_count at 22:00 = 61 (elevated workload at the same minute), supporting a workload-driven CPU spike.
+- front-end experienced a separate earlier CPU spike (21:46) coincident with very high front-end row_count, but its relative deviation is smaller and temporally separate; treat as contributing load but not the primary root cause for the 22:00 incident.
+- No trace telemetry and no error_log entries were available to further confirm propagation; log.error_count is 0 for these services in-window.
+Recommended actions:
+1) Investigate shipping service at ~22:00 UTC: check application logs around that minute for long-running requests, thread/worker exhaustion, or CPU-heavy operations.
+2) If shipping is CPU-bound under load, consider horizontal scaling (add replicas) or throttling/queueing of requests to shipping to prevent transient overloads.
+3) Review recent deployments or configuration changes to shipping that could increase CPU per-request cost.
+4) Correlate with any detailed application logs or traces (if enabled) to identify the exact operation causing CPU consumption.
+
+This is the most likely root cause based on available metrics and logs; further confirmation requires traces or application logs from shipping around 22:00 UTC.
+--------------------------------------------------------------------------------
+2026-07-04 09:39:05,918 | DEBUG | Raw Final Answer:
+```json
+{
+    "1": {
+        "root cause occurrence datetime": "2024-01-18 22:02:00",
+        "root cause component": "user",
+        "root cause reason": "high CPU usage"
+    }
+}
+```
+2026-07-04 09:39:05,918 | INFO | Result: {
+    "1": {
+        "root cause occurrence datetime": "2024-01-18 22:02:00",
+        "root cause component": "user",
+        "root cause reason": "high CPU usage"
+    }
+}
+2026-07-04 09:39:05,944 | INFO | Framework Answer: {
+    "1": {
+        "root cause occurrence datetime": "2024-01-18 22:02:00",
+        "root cause component": "user",
+        "root cause reason": "high CPU usage"
+    }
+}
+2026-07-04 09:39:05,944 | INFO | Prediction: {
+    "1": {
+        "root cause occurrence datetime": "2024-01-18 22:02:00",
+        "root cause component": "user",
+        "root cause reason": "high CPU usage"
+    }
+}
+2026-07-04 09:39:05,944 | INFO | Scoring Points: The only predicted root cause component is user
+The only predicted root cause reason is high CPU usage
+2026-07-04 09:39:05,944 | INFO | Passed Criteria: ['user', 'high CPU usage']
+2026-07-04 09:39:05,944 | INFO | Failed Criteria: []
+2026-07-04 09:39:05,944 | INFO | Score: 1.0

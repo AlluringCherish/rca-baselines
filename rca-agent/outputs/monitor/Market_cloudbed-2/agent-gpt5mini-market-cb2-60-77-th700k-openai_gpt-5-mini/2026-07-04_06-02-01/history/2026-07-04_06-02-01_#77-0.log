@@ -1,0 +1,1631 @@
+2026-07-04 06:02:01,764 | INFO | ################################################################################
+2026-07-04 06:02:01,764 | INFO | 2026-07-04_06-02-01_#77-0: Market/cloudbed-2 idx=77 task_7
+2026-07-04 06:02:01,764 | INFO | ################################################################################
+2026-07-04 06:02:01,764 | INFO | Objective: The cloud service system, cloudbed-2, experienced a failure during the time range of March 21, 2022, from 03:30 to 04:00. The root cause component, the exact root cause occurrence time, and the underlying reason are currently unknown. You are tasked with identifying the root cause component, the root cause occurrence datetime, and the root cause reason.
+2026-07-04 06:02:10,618 | DEBUG | Raw Response:
+{
+    "analysis": "None",
+    "completed": "False",
+    "instruction": "Load metric.csv, trace.csv, log.csv, and error_logs.csv from the current directory. For each file provide a compact summary (limit outputs to top 50 rows where applicable):\n1) Overall row count, timestamp minimum and maximum.\n2) Distinct cmdb_id values (list all if <=50, otherwise top 50 by frequency).\n3) Distinct KPI/feature names: for metric.csv use kpi_name, for trace.csv use trace_name, for log.csv use log_name, for error_logs.csv just indicate presence of message field and top 20 distinct message samples.\nAdditionally, for metric.csv compute the global P95 value of 'value' for each component-KPI pair (group by cmdb_id and kpi_name). Return the top 20 component-KPI pairs sorted by row count with columns: cmdb_id, kpi_name, count, p95_value, min_timestamp, max_timestamp.\nKeep output compact and store full tables in kernel variables for later steps. Limit any displayed rows to at most 20 except listing all cmdb_ids if <=50."
+}
+2026-07-04 06:02:10,618 | INFO | --------------------------------------------------------------------------------
+### Step[1]
+Analysis: None
+Instruction: Load metric.csv, trace.csv, log.csv, and error_logs.csv from the current directory. For each file provide a compact summary (limit outputs to top 50 rows where applicable):
+1) Overall row count, timestamp minimum and maximum.
+2) Distinct cmdb_id values (list all if <=50, otherwise top 50 by frequency).
+3) Distinct KPI/feature names: for metric.csv use kpi_name, for trace.csv use trace_name, for log.csv use log_name, for error_logs.csv just indicate presence of message field and top 20 distinct message samples.
+Additionally, for metric.csv compute the global P95 value of 'value' for each component-KPI pair (group by cmdb_id and kpi_name). Return the top 20 component-KPI pairs sorted by row count with columns: cmdb_id, kpi_name, count, p95_value, min_timestamp, max_timestamp.
+Keep output compact and store full tables in kernel variables for later steps. Limit any displayed rows to at most 20 except listing all cmdb_ids if <=50.
+--------------------------------------------------------------------------------
+2026-07-04 06:02:10,618 | DEBUG | Start execution
+2026-07-04 06:02:30,215 | DEBUG | Raw Code:
+import pandas as pd
+import numpy as np
+import pytz
+
+# timezone per requirement
+tz = pytz.timezone('Asia/Shanghai')
+
+# Load CSVs into memory (full tables kept in variables for later steps)
+metric_df = pd.read_csv('metric.csv')
+trace_df = pd.read_csv('trace.csv')
+log_df = pd.read_csv('log.csv')
+error_df = pd.read_csv('error_logs.csv')
+
+# Helper: convert epoch-second to tz-aware datetime (returns pandas.Timestamp)
+def ts_to_dt(ts):
+    return pd.to_datetime(ts, unit='s', utc=True).tz_convert(tz)
+
+# Compact overall summary function
+def compact_overview(df, ts_col='timestamp'):
+    total = int(df.shape[0])
+    if total == 0:
+        min_ts = None
+        max_ts = None
+    else:
+        min_ts = ts_to_dt(int(df[ts_col].min()))
+        max_ts = ts_to_dt(int(df[ts_col].max()))
+    overview = pd.DataFrame({
+        'rows': [total],
+        'min_timestamp': [min_ts],
+        'max_timestamp': [max_ts]
+    })
+    return overview
+
+# Compact listing of cmdb_ids: list all if <=50 else top 50 by frequency
+def cmdb_id_listing(df, max_list=50):
+    vc = df['cmdb_id'].value_counts()
+    unique = vc.shape[0]
+    if unique <= max_list:
+        # list all (sorted alphabetically for readability)
+        all_ids = pd.Series(sorted(df['cmdb_id'].unique()), name='cmdb_id')
+        return all_ids
+    else:
+        top = vc.head(max_list).reset_index()
+        top.columns = ['cmdb_id', 'count']
+        return top
+
+# Compact listing of KPI/feature names (show up to 50)
+def name_listing(df, name_col, max_list=50):
+    vc = df[name_col].value_counts()
+    unique = vc.shape[0]
+    if unique <= max_list:
+        all_names = pd.Series(sorted(df[name_col].unique()), name=name_col)
+        return all_names
+    else:
+        top = vc.head(max_list).reset_index()
+        top.columns = [name_col, 'count']
+        return top
+
+# Build summaries for each file
+metric_overview = compact_overview(metric_df, 'timestamp')
+trace_overview = compact_overview(trace_df, 'timestamp')
+log_overview = compact_overview(log_df, 'timestamp')
+error_overview = compact_overview(error_df, 'timestamp')
+
+metric_cmdb_ids = cmdb_id_listing(metric_df)
+trace_cmdb_ids = cmdb_id_listing(trace_df)
+log_cmdb_ids = cmdb_id_listing(log_df)
+error_cmdb_ids = cmdb_id_listing(error_df)
+
+metric_kpis = name_listing(metric_df, 'kpi_name')
+trace_features = name_listing(trace_df, 'trace_name')
+log_features = name_listing(log_df, 'log_name')
+
+# For error_logs, indicate presence of 'message' and top 20 distinct message samples
+has_message_field = 'message' in error_df.columns
+if has_message_field and error_df.shape[0] > 0:
+    error_message_samples = error_df['message'].value_counts().head(20).reset_index()
+    error_message_samples.columns = ['message', 'count']
+else:
+    # compact placeholder when no messages
+    error_message_samples = pd.DataFrame({'message': [], 'count': []})
+
+# For metric.csv compute global P95 of 'value' for each component-KPI pair (group by cmdb_id and kpi_name)
+# Note: per rule, compute global quantile on entire series before any time filtering (we're using whole file)
+if metric_df.shape[0] > 0:
+    # Ensure value is numeric
+    metric_df['value'] = pd.to_numeric(metric_df['value'], errors='coerce')
+    # Group and aggregate
+    grouped = metric_df.groupby(['cmdb_id', 'kpi_name'], dropna=False).agg(
+        count=('value', 'size'),
+        p95_value=('value', lambda s: s.quantile(0.95) if s.notna().any() else np.nan),
+        min_timestamp=('timestamp', 'min'),
+        max_timestamp=('timestamp', 'max')
+    ).reset_index()
+    # Convert timestamps to tz-aware datetimes (compact strings)
+    grouped['min_timestamp'] = grouped['min_timestamp'].apply(lambda x: ts_to_dt(int(x)) if pd.notna(x) else None)
+    grouped['max_timestamp'] = grouped['max_timestamp'].apply(lambda x: ts_to_dt(int(x)) if pd.notna(x) else None)
+    # Sort by row count desc and take top 20
+    metric_top20_groups = grouped.sort_values('count', ascending=False).head(20).reset_index(drop=True)
+    # Keep a full grouped table in memory for later use
+    metric_grouped_full = grouped.sort_values('count', ascending=False).reset_index(drop=True)
+else:
+    metric_top20_groups = pd.DataFrame(columns=['cmdb_id','kpi_name','count','p95_value','min_timestamp','max_timestamp'])
+    metric_grouped_full = metric_top20_groups.copy()
+
+# For compactness, ensure displayed tables are limited to at most 20 rows
+# Prepare final compact outputs (these variables will be shown by the IPython kernel)
+# Each of these is intentionally small: overviews (1-row), cmdb lists (<=50 rows), name lists (<=50), top groups (<=20)
+metric_overview, metric_cmdb_ids, metric_kpis.head(50), metric_top20_groups.head(20), \
+trace_overview, trace_cmdb_ids, trace_features.head(50), \
+log_overview, log_cmdb_ids, log_features.head(50), \
+error_overview, error_cmdb_ids, pd.Series({'has_message_field': has_message_field}), error_message_samples.head(20)
+2026-07-04 06:02:32,973 | DEBUG | Execution Result:
+(     rows             min_timestamp             max_timestamp
+0  146292 2022-03-21 03:30:00+08:00 2022-03-21 03:59:00+08:00,           cmdb_id  count
+0       adservice  10230
+1      adservice2   9990
+2     frontend2-0   5040
+3      frontend-0   4920
+4      frontend-1   4680
+..            ...    ...
+45         node-1   1692
+46         node-3   1692
+47         node-5   1692
+48  redis-cart2-0    360
+49   redis-cart-0    360
+
+[50 rows x 2 columns],                                              kpi_name  count
+0   container.node-5.container_network_transmit_pa...   1050
+1   container.node-5.container_network_transmit_pa...   1050
+2   container.node-5.container_network_receive_MB....   1050
+3   container.node-5.container_network_receive_err...   1050
+4   container.node-5.container_network_transmit_er...   1050
+..                                                ...    ...
+45   container.node-5.container_fs_usage_MB./dev/vda1    990
+46  container.node-5.container_fs_write_seconds./d...    990
+47     container.node-5.container_fs_writes./dev/vda1    990
+48     container.node-5.container_fs_inodes./dev/vda1    990
+49        container.node-5.container_file_descriptors    990
+
+[50 rows x 2 columns],                cmdb_id                                           kpi_name  count     p95_value             min_timestamp             max_timestamp
+0   shippingservice2-0  mesh.source.shippingservice2.jaeger-collector....     30   1226.337500 2022-03-21 03:30:00+08:00 2022-03-21 03:59:00+08:00
+1            adservice                                     app.grpc.count     30     88.550000 2022-03-21 03:30:00+08:00 2022-03-21 03:59:00+08:00
+2            adservice                                       app.grpc.mrt     30      0.002580 2022-03-21 03:30:00+08:00 2022-03-21 03:59:00+08:00
+3            adservice                                        app.grpc.rr     30    100.000000 2022-03-21 03:30:00+08:00 2022-03-21 03:59:00+08:00
+4            adservice                                        app.grpc.sr     30     80.285714 2022-03-21 03:30:00+08:00 2022-03-21 03:59:00+08:00
+5            adservice                                     app.http.count     30     24.000000 2022-03-21 03:30:00+08:00 2022-03-21 03:59:00+08:00
+6            adservice                                       app.http.mrt     30      0.009565 2022-03-21 03:30:00+08:00 2022-03-21 03:59:00+08:00
+7            adservice                                        app.http.rr     30    100.000000 2022-03-21 03:30:00+08:00 2022-03-21 03:59:00+08:00
+8            adservice                                        app.http.sr     30    100.000000 2022-03-21 03:30:00+08:00 2022-03-21 03:59:00+08:00
+9            adservice    runtime.java_lang_ClassLoading_LoadedClassCount     30   4990.000000 2022-03-21 03:30:00+08:00 2022-03-21 03:59:00+08:00
+10           adservice  runtime.java_lang_ClassLoading_TotalLoadedClas...     30   4990.000000 2022-03-21 03:30:00+08:00 2022-03-21 03:59:00+08:00
+11           adservice  runtime.java_lang_ClassLoading_UnloadedClassCount     30      0.000000 2022-03-21 03:30:00+08:00 2022-03-21 03:59:00+08:00
+12           adservice             runtime.java_lang_ClassLoading_Verbose     30      0.000000 2022-03-21 03:30:00+08:00 2022-03-21 03:59:00+08:00
+13           adservice  runtime.java_lang_Compilation_CompilationTimeM...     30      1.000000 2022-03-21 03:30:00+08:00 2022-03-21 03:59:00+08:00
+14           adservice  runtime.java_lang_Compilation_TotalCompilation...     30  43714.000000 2022-03-21 03:30:00+08:00 2022-03-21 03:59:00+08:00
+15           adservice  runtime.java_lang_GarbageCollector_CollectionC...     30  41868.054167 2022-03-21 03:30:00+08:00 2022-03-21 03:59:00+08:00
+16           adservice  runtime.java_lang_GarbageCollector_CollectionC...     30      3.000000 2022-03-21 03:30:00+08:00 2022-03-21 03:59:00+08:00
+17           adservice  runtime.java_lang_GarbageCollector_CollectionT...     30  65761.562500 2022-03-21 03:30:00+08:00 2022-03-21 03:59:00+08:00
+18           adservice  runtime.java_lang_GarbageCollector_CollectionT...     30    177.000000 2022-03-21 03:30:00+08:00 2022-03-21 03:59:00+08:00
+19           adservice  runtime.java_lang_GarbageCollector_LastGcInfo_...     30      1.000000 2022-03-21 03:30:00+08:00 2022-03-21 03:59:00+08:00,     rows             min_timestamp             max_timestamp
+0  29672 2022-03-21 03:30:00+08:00 2022-03-21 03:59:00+08:00, 0                  adservice-0
+1                  adservice-1
+2                  adservice-2
+3                 adservice2-0
+4                cartservice-0
+                ...           
+35    recommendationservice2-0
+36           shippingservice-0
+37           shippingservice-1
+38           shippingservice-2
+39          shippingservice2-0
+Name: cmdb_id, Length: 40, dtype: object,                                trace_name  count
+0         trace.from_frontend-2.row_count    579
+1        trace.from_frontend-2.error_rate    579
+2      trace.from_frontend-2.duration_p95    579
+3     trace.from_frontend-2.duration_mean    579
+4         trace.from_frontend-1.row_count    555
+..                                    ...    ...
+45    trace.from_frontend2-0.duration_p95    206
+46      trace.from_frontend2-0.error_rate    206
+47       trace.from_frontend2-0.row_count    206
+48   trace.to_currencyservice-2.row_count    163
+49  trace.to_currencyservice-2.error_rate    163
+
+[50 rows x 2 columns],    rows             min_timestamp             max_timestamp
+0  1728 2022-03-21 03:30:00+08:00 2022-03-21 03:59:00+08:00, 0                 adservice-0
+1                 adservice-1
+2                 adservice-2
+3               cartservice-0
+4               cartservice-1
+               ...           
+26    recommendationservice-2
+27               redis-cart-0
+28          shippingservice-0
+29          shippingservice-1
+30          shippingservice-2
+Name: cmdb_id, Length: 31, dtype: object, 0    log.error_count
+1      log.row_count
+Name: log_name, dtype: object,    rows             min_timestamp             max_timestamp
+0   550 2022-03-21 03:30:01+08:00 2022-03-21 03:59:59+08:00, 0    frontend-0
+1    frontend-1
+2    frontend-2
+Name: cmdb_id, dtype: object, has_message_field    True
+dtype: bool,                                              message  count
+0  severity: warning, message: failed to retrieve...    550)
+
+**Note**: The printed pandas DataFrame is truncated due to its size. Only **10 rows** are displayed, which may introduce observation bias due to the incomplete table. If you want to comprehensively understand the details without bias, please ask Executor using `df.head(X)` to display more rows.
+2026-07-04 06:02:32,973 | DEBUG | Execution finished. Time cost: 0:00:22.354346
+2026-07-04 06:02:48,981 | DEBUG | Brief Answer:
+```python
+summary = (
+    "Summary of telemetry CSVs (based on the execution results):\n\n"
+    "metric.csv\n"
+    "- Rows: 146,292\n"
+    "- Timestamp range (UTC+8): 2022-03-21 03:30:00 to 2022-03-21 03:59:00\n"
+    "- Distinct cmdb_id: top entries shown (list truncated to 50). Examples: adservice (10230), adservice2 (9990), "
+    "frontend2-0 (5040), frontend-0 (4920), frontend-1 (4680), ... (top 50 shown)\n"
+    "- Distinct kpi_name: many KPI names (top 50 shown). Examples include container.node-5.container_network_transmit_..., "
+    "container.node-5.container_network_receive_..., container_fs_usage_MB..., file_descriptors, etc.\n"
+    "- Aggregated metric (component-KPI) P95s: computed globally. Top 20 component-KPI pairs by row count were returned "
+    "(sorted by count). Sample top entries:\n"
+    "  * shippingservice2-0 / mesh.source.shippingservice2.jaeger-collector... — count=30, p95=1226.3375, "
+    "timestamps 2022-03-21 03:30:00 to 2022-03-21 03:59:00\n"
+    "  * adservice / app.grpc.count — count=30, p95=88.55, timestamps 2022-03-21 03:30:00 to 2022-03-21 03:59:00\n"
+    "  * adservice / app.grpc.mrt — count=30, p95=0.00258, timestamps 2022-03-21 03:30:00 to 2022-03-21 03:59:00\n"
+    "  (the top-20 table contains 20 rows; many adservice KPIs appear among them; all top entries have the same 03:30–03:59 time window)\n\n"
+    "trace.csv\n"
+    "- Rows: 29,672\n"
+    "- Timestamp range (UTC+8): 2022-03-21 03:30:00 to 2022-03-21 03:59:00\n"
+    "- Distinct cmdb_id: 40 distinct IDs shown (list length=40). Examples include adservice-0/1/2, shippingservice-*, checkoutservice-*, etc.\n"
+    "- Distinct trace features: many; top examples (by frequency): trace.from_frontend-2.row_count (579), "
+    "trace.from_frontend-2.error_rate (579), trace.from_frontend-2.duration_p95 (579), trace.from_frontend-2.duration_mean (579), ...\n\n"
+    "log.csv\n"
+    "- Rows: 1,728\n"
+    "- Timestamp range (UTC+8): 2022-03-21 03:30:00 to 2022-03-21 03:59:00\n"
+    "- Distinct cmdb_id: 31 distinct IDs shown (list length=31).\n"
+    "- Distinct log features: log.error_count and log.row_count (these are the observed log_name values).\n\n"
+    "error_logs.csv\n"
+    "- Rows: 550\n"
+    "- Timestamp range (UTC+8): 2022-03-21 03:30:01 to 2022-03-21 03:59:59\n"
+    "- Distinct cmdb_id: frontends shown (frontend-0, frontend-1, frontend-2) in the sample output.\n"
+    "- message field: present. Top message sample shown: \"severity: warning, message: failed to retrieve...\" (count=550) — appears to be the dominant message in the file.\n\n"
+    "Notes:\n"
+    "- All aggregated timestamps reported here are in UTC+8 as required.\n"
+    "- The metric component-KPI P95s were computed globally (using the entire metric series) before any time filtering.\n"
+    "- Displayed lists/tables were intentionally truncated for compactness (top 50 when applicable, top 20 for metric groups). "
+    "Full tables are retained in kernel variables for further inspection if needed."
+)
+summary
+```
+2026-07-04 06:02:48,981 | INFO | --------------------------------------------------------------------------------
+Step[1]
+### Observation:
+```python
+summary = (
+    "Summary of telemetry CSVs (based on the execution results):\n\n"
+    "metric.csv\n"
+    "- Rows: 146,292\n"
+    "- Timestamp range (UTC+8): 2022-03-21 03:30:00 to 2022-03-21 03:59:00\n"
+    "- Distinct cmdb_id: top entries shown (list truncated to 50). Examples: adservice (10230), adservice2 (9990), "
+    "frontend2-0 (5040), frontend-0 (4920), frontend-1 (4680), ... (top 50 shown)\n"
+    "- Distinct kpi_name: many KPI names (top 50 shown). Examples include container.node-5.container_network_transmit_..., "
+    "container.node-5.container_network_receive_..., container_fs_usage_MB..., file_descriptors, etc.\n"
+    "- Aggregated metric (component-KPI) P95s: computed globally. Top 20 component-KPI pairs by row count were returned "
+    "(sorted by count). Sample top entries:\n"
+    "  * shippingservice2-0 / mesh.source.shippingservice2.jaeger-collector... — count=30, p95=1226.3375, "
+    "timestamps 2022-03-21 03:30:00 to 2022-03-21 03:59:00\n"
+    "  * adservice / app.grpc.count — count=30, p95=88.55, timestamps 2022-03-21 03:30:00 to 2022-03-21 03:59:00\n"
+    "  * adservice / app.grpc.mrt — count=30, p95=0.00258, timestamps 2022-03-21 03:30:00 to 2022-03-21 03:59:00\n"
+    "  (the top-20 table contains 20 rows; many adservice KPIs appear among them; all top entries have the same 03:30–03:59 time window)\n\n"
+    "trace.csv\n"
+    "- Rows: 29,672\n"
+    "- Timestamp range (UTC+8): 2022-03-21 03:30:00 to 2022-03-21 03:59:00\n"
+    "- Distinct cmdb_id: 40 distinct IDs shown (list length=40). Examples include adservice-0/1/2, shippingservice-*, checkoutservice-*, etc.\n"
+    "- Distinct trace features: many; top examples (by frequency): trace.from_frontend-2.row_count (579), "
+    "trace.from_frontend-2.error_rate (579), trace.from_frontend-2.duration_p95 (579), trace.from_frontend-2.duration_mean (579), ...\n\n"
+    "log.csv\n"
+    "- Rows: 1,728\n"
+    "- Timestamp range (UTC+8): 2022-03-21 03:30:00 to 2022-03-21 03:59:00\n"
+    "- Distinct cmdb_id: 31 distinct IDs shown (list length=31).\n"
+    "- Distinct log features: log.error_count and log.row_count (these are the observed log_name values).\n\n"
+    "error_logs.csv\n"
+    "- Rows: 550\n"
+    "- Timestamp range (UTC+8): 2022-03-21 03:30:01 to 2022-03-21 03:59:59\n"
+    "- Distinct cmdb_id: frontends shown (frontend-0, frontend-1, frontend-2) in the sample output.\n"
+    "- message field: present. Top message sample shown: \"severity: warning, message: failed to retrieve...\" (count=550) — appears to be the dominant message in the file.\n\n"
+    "Notes:\n"
+    "- All aggregated timestamps reported here are in UTC+8 as required.\n"
+    "- The metric component-KPI P95s were computed globally (using the entire metric series) before any time filtering.\n"
+    "- Displayed lists/tables were intentionally truncated for compactness (top 50 when applicable, top 20 for metric groups). "
+    "Full tables are retained in kernel variables for further inspection if needed."
+)
+summary
+```
+
+The original code execution output of IPython Kernel is also provided below for reference:
+
+(     rows             min_timestamp             max_timestamp
+0  146292 2022-03-21 03:30:00+08:00 2022-03-21 03:59:00+08:00,           cmdb_id  count
+0       adservice  10230
+1      adservice2   9990
+2     frontend2-0   5040
+3      frontend-0   4920
+4      frontend-1   4680
+..            ...    ...
+45         node-1   1692
+46         node-3   1692
+47         node-5   1692
+48  redis-cart2-0    360
+49   redis-cart-0    360
+
+[50 rows x 2 columns],                                              kpi_name  count
+0   container.node-5.container_network_transmit_pa...   1050
+1   container.node-5.container_network_transmit_pa...   1050
+2   container.node-5.container_network_receive_MB....   1050
+3   container.node-5.container_network_receive_err...   1050
+4   container.node-5.container_network_transmit_er...   1050
+..                                                ...    ...
+45   container.node-5.container_fs_usage_MB./dev/vda1    990
+46  container.node-5.container_fs_write_seconds./d...    990
+47     container.node-5.container_fs_writes./dev/vda1    990
+48     container.node-5.container_fs_inodes./dev/vda1    990
+49        container.node-5.container_file_descriptors    990
+
+[50 rows x 2 columns],                cmdb_id                                           kpi_name  count     p95_value             min_timestamp             max_timestamp
+0   shippingservice2-0  mesh.source.shippingservice2.jaeger-collector....     30   1226.337500 2022-03-21 03:30:00+08:00 2022-03-21 03:59:00+08:00
+1            adservice                                     app.grpc.count     30     88.550000 2022-03-21 03:30:00+08:00 2022-03-21 03:59:00+08:00
+2            adservice                                       app.grpc.mrt     30      0.002580 2022-03-21 03:30:00+08:00 2022-03-21 03:59:00+08:00
+3            adservice                                        app.grpc.rr     30    100.000000 2022-03-21 03:30:00+08:00 2022-03-21 03:59:00+08:00
+4            adservice                                        app.grpc.sr     30     80.285714 2022-03-21 03:30:00+08:00 2022-03-21 03:59:00+08:00
+5            adservice                                     app.http.count     30     24.000000 2022-03-21 03:30:00+08:00 2022-03-21 03:59:00+08:00
+6            adservice                                       app.http.mrt     30      0.009565 2022-03-21 03:30:00+08:00 2022-03-21 03:59:00+08:00
+7            adservice                                        app.http.rr     30    100.000000 2022-03-21 03:30:00+08:00 2022-03-21 03:59:00+08:00
+8            adservice                                        app.http.sr     30    100.000000 2022-03-21 03:30:00+08:00 2022-03-21 03:59:00+08:00
+9            adservice    runtime.java_lang_ClassLoading_LoadedClassCount     30   4990.000000 2022-03-21 03:30:00+08:00 2022-03-21 03:59:00+08:00
+10           adservice  runtime.java_lang_ClassLoading_TotalLoadedClas...     30   4990.000000 2022-03-21 03:30:00+08:00 2022-03-21 03:59:00+08:00
+11           adservice  runtime.java_lang_ClassLoading_UnloadedClassCount     30      0.000000 2022-03-21 03:30:00+08:00 2022-03-21 03:59:00+08:00
+12           adservice             runtime.java_lang_ClassLoading_Verbose     30      0.000000 2022-03-21 03:30:00+08:00 2022-03-21 03:59:00+08:00
+13           adservice  runtime.java_lang_Compilation_CompilationTimeM...     30      1.000000 2022-03-21 03:30:00+08:00 2022-03-21 03:59:00+08:00
+14           adservice  runtime.java_lang_Compilation_TotalCompilation...     30  43714.000000 2022-03-21 03:30:00+08:00 2022-03-21 03:59:00+08:00
+15           adservice  runtime.java_lang_GarbageCollector_CollectionC...     30  41868.054167 2022-03-21 03:30:00+08:00 2022-03-21 03:59:00+08:00
+16           adservice  runtime.java_lang_GarbageCollector_CollectionC...     30      3.000000 2022-03-21 03:30:00+08:00 2022-03-21 03:59:00+08:00
+17           adservice  runtime.java_lang_GarbageCollector_CollectionT...     30  65761.562500 2022-03-21 03:30:00+08:00 2022-03-21 03:59:00+08:00
+18           adservice  runtime.java_lang_GarbageCollector_CollectionT...     30    177.000000 2022-03-21 03:30:00+08:00 2022-03-21 03:59:00+08:00
+19           adservice  runtime.java_lang_GarbageCollector_LastGcInfo_...     30      1.000000 2022-03-21 03:30:00+08:00 2022-03-21 03:59:00+08:00,     rows             min_timestamp             max_timestamp
+0  29672 2022-03-21 03:30:00+08:00 2022-03-21 03:59:00+08:00, 0                  adservice-0
+1                  adservice-1
+2                  adservice-2
+3                 adservice2-0
+4                cartservice-0
+                ...           
+35    recommendationservice2-0
+36           shippingservice-0
+37           shippingservice-1
+38           shippingservice-2
+39          shippingservice2-0
+Name: cmdb_id, Length: 40, dtype: object,                                trace_name  count
+0         trace.from_frontend-2.row_count    579
+1        trace.from_frontend-2.error_rate    579
+2      trace.from_frontend-2.duration_p95    579
+3     trace.from_frontend-2.duration_mean    579
+4         trace.from_frontend-1.row_count    555
+..                                    ...    ...
+45    trace.from_frontend2-0.duration_p95    206
+46      trace.from_frontend2-0.error_rate    206
+47       trace.from_frontend2-0.row_count    206
+48   trace.to_currencyservice-2.row_count    163
+49  trace.to_currencyservice-2.error_rate    163
+
+[50 rows x 2 columns],    rows             min_timestamp             max_timestamp
+0  1728 2022-03-21 03:30:00+08:00 2022-03-21 03:59:00+08:00, 0                 adservice-0
+1                 adservice-1
+2                 adservice-2
+3               cartservice-0
+4               cartservice-1
+               ...           
+26    recommendationservice-2
+27               redis-cart-0
+28          shippingservice-0
+29          shippingservice-1
+30          shippingservice-2
+Name: cmdb_id, Length: 31, dtype: object, 0    log.error_count
+1      log.row_count
+Name: log_name, dtype: object,    rows             min_timestamp             max_timestamp
+0   550 2022-03-21 03:30:01+08:00 2022-03-21 03:59:59+08:00, 0    frontend-0
+1    frontend-1
+2    frontend-2
+Name: cmdb_id, dtype: object, has_message_field    True
+dtype: bool,                                              message  count
+0  severity: warning, message: failed to retrieve...    550)
+
+**Note**: The printed pandas DataFrame is truncated due to its size. Only **10 rows** are displayed, which may introduce observation bias due to the incomplete table. If you want to comprehensively understand the details without bias, please ask Executor using `df.head(X)` to display more rows.
+--------------------------------------------------------------------------------
+2026-07-04 06:03:02,189 | DEBUG | Raw Response:
+{
+    "analysis": "Executor loaded metric.csv, trace.csv, log.csv, and error_logs.csv and produced a compact summary: metric.csv has 146,292 rows spanning 2022-03-21 03:30–03:59 (UTC+8) and many cmdb_id and kpi_name values; trace.csv and log.csv were also loaded and stored. The Executor already computed global P95 for component-KPI groups (example top-20 shown). Full tables are cached in kernel variables for later steps. From these results we can proceed to metric-based anomaly detection within the incident window (03:30–04:00) using the global thresholds already computed. This will narrow candidate components/KPIs by counting how many points in the incident window exceed their global P95, and provide earliest anomaly times and severity (how far they exceed P95).",
+    "completed": "False",
+    "instruction": "Using the cached metric table and the previously computed global P95 per (cmdb_id, kpi_name), perform metric anomaly detection for the incident window 2022-03-21 03:30:00 (inclusive) to 2022-03-21 04:00:00 (exclusive or inclusive up to available data). For each (cmdb_id, kpi_name) group do the following: 1) count total points in the incident window, 2) count how many points in the window have value > global P95, 3) record the earliest timestamp in the window where value > P95 (if any), 4) compute the maximum value observed in the window, 5) output the group's global P95. Return the top 20 groups sorted by anomaly count (highest first). Include these columns: cmdb_id, kpi_name, total_points_in_window, anomaly_count_over_p95, earliest_anomaly_timestamp, max_value_in_window, global_p95, max_over_p95_ratio (max_value_in_window / global_p95). Limit returned rows to 20. Store the full anomaly table in a kernel variable for follow-up steps."
+}
+2026-07-04 06:03:02,189 | INFO | --------------------------------------------------------------------------------
+### Step[2]
+Analysis: Executor loaded metric.csv, trace.csv, log.csv, and error_logs.csv and produced a compact summary: metric.csv has 146,292 rows spanning 2022-03-21 03:30–03:59 (UTC+8) and many cmdb_id and kpi_name values; trace.csv and log.csv were also loaded and stored. The Executor already computed global P95 for component-KPI groups (example top-20 shown). Full tables are cached in kernel variables for later steps. From these results we can proceed to metric-based anomaly detection within the incident window (03:30–04:00) using the global thresholds already computed. This will narrow candidate components/KPIs by counting how many points in the incident window exceed their global P95, and provide earliest anomaly times and severity (how far they exceed P95).
+Instruction: Using the cached metric table and the previously computed global P95 per (cmdb_id, kpi_name), perform metric anomaly detection for the incident window 2022-03-21 03:30:00 (inclusive) to 2022-03-21 04:00:00 (exclusive or inclusive up to available data). For each (cmdb_id, kpi_name) group do the following: 1) count total points in the incident window, 2) count how many points in the window have value > global P95, 3) record the earliest timestamp in the window where value > P95 (if any), 4) compute the maximum value observed in the window, 5) output the group's global P95. Return the top 20 groups sorted by anomaly count (highest first). Include these columns: cmdb_id, kpi_name, total_points_in_window, anomaly_count_over_p95, earliest_anomaly_timestamp, max_value_in_window, global_p95, max_over_p95_ratio (max_value_in_window / global_p95). Limit returned rows to 20. Store the full anomaly table in a kernel variable for follow-up steps.
+--------------------------------------------------------------------------------
+2026-07-04 06:03:02,189 | DEBUG | Start execution
+2026-07-04 06:03:16,405 | DEBUG | Raw Code:
+import pandas as pd
+import numpy as np
+import pytz
+
+# Reuse existing variables: metric_df, metric_grouped_full, ts_to_dt, tz
+# Ensure they exist; if not, raise informative error
+try:
+    metric_df
+    metric_grouped_full
+    ts_to_dt
+    tz
+except NameError as e:
+    raise RuntimeError("Required cached variables (metric_df, metric_grouped_full, ts_to_dt, tz) are missing.") from e
+
+# Ensure value is numeric
+metric_df['value'] = pd.to_numeric(metric_df['value'], errors='coerce')
+
+# Prepare global P95 lookup (computed previously)
+# metric_grouped_full is expected to have columns: cmdb_id, kpi_name, p95_value
+p95_lookup = metric_grouped_full[['cmdb_id', 'kpi_name', 'p95_value']].drop_duplicates()
+
+# Define incident window in UTC epoch seconds
+start_local = tz.localize(pd.Timestamp("2022-03-21 03:30:00"))
+end_local = tz.localize(pd.Timestamp("2022-03-21 04:00:00"))
+start_ts = int(start_local.tz_convert(pytz.UTC).timestamp())
+end_ts = int(end_local.tz_convert(pytz.UTC).timestamp())
+
+# Filter metric rows in the incident window [start_ts, end_ts)
+window_df = metric_df[(metric_df['timestamp'] >= start_ts) & (metric_df['timestamp'] < end_ts)].copy()
+
+# Merge global p95 into windowed rows
+window_merged = window_df.merge(p95_lookup, on=['cmdb_id', 'kpi_name'], how='left')
+
+# Define function to compute per-group anomaly stats
+def compute_group_stats(df):
+    total_points = int(df.shape[0])
+    # Only consider anomaly where value > global p95_value and p95_value is finite
+    cond = df['value'] > df['p95_value']
+    anomaly_count = int(cond.sum())
+    if anomaly_count > 0:
+        earliest_ts = int(df.loc[cond, 'timestamp'].min())
+        earliest_dt = ts_to_dt(earliest_ts)
+    else:
+        earliest_dt = pd.NaT
+    max_value = df['value'].max(skipna=True)
+    # global p95 for group (should be same for all rows in group)
+    global_p95 = df['p95_value'].iloc[0] if df['p95_value'].notna().any() else np.nan
+    # ratio handling: avoid division by zero or nan
+    if pd.isna(global_p95) or global_p95 == 0:
+        ratio = np.nan
+    else:
+        ratio = max_value / global_p95 if pd.notna(max_value) else np.nan
+    return pd.Series({
+        'total_points_in_window': total_points,
+        'anomaly_count_over_p95': anomaly_count,
+        'earliest_anomaly_timestamp': earliest_dt,
+        'max_value_in_window': max_value,
+        'global_p95': global_p95,
+        'max_over_p95_ratio': ratio
+    })
+
+# Group by and compute stats
+if window_merged.shape[0] > 0:
+    grouped_stats = window_merged.groupby(['cmdb_id', 'kpi_name'], sort=False).apply(compute_group_stats).reset_index()
+else:
+    grouped_stats = pd.DataFrame(columns=[
+        'cmdb_id','kpi_name','total_points_in_window','anomaly_count_over_p95',
+        'earliest_anomaly_timestamp','max_value_in_window','global_p95','max_over_p95_ratio'
+    ])
+
+# Convert earliest_anomaly_timestamp NaT to None for compactness
+grouped_stats['earliest_anomaly_timestamp'] = grouped_stats['earliest_anomaly_timestamp'].where(
+    grouped_stats['earliest_anomaly_timestamp'].notna(), None
+)
+
+# Sort by anomaly count descending, then by total points descending, and take top 20
+metric_anomaly_full = grouped_stats.sort_values(
+    ['anomaly_count_over_p95', 'total_points_in_window'], ascending=[False, False]
+).reset_index(drop=True)
+
+metric_anomaly_top20 = metric_anomaly_full.head(20)
+
+# Keep output compact: display only the requested columns and at most 20 rows
+metric_anomaly_top20[['cmdb_id', 'kpi_name', 'total_points_in_window',
+                      'anomaly_count_over_p95', 'earliest_anomaly_timestamp',
+                      'max_value_in_window', 'global_p95', 'max_over_p95_ratio']]
+2026-07-04 06:03:19,135 | DEBUG | Execution Result:
+cmdb_id                                           kpi_name  total_points_in_window  anomaly_count_over_p95 earliest_anomaly_timestamp  max_value_in_window    global_p95  max_over_p95_ratio
+0   adservice                                     app.grpc.count                      30                       2  2022-03-21 03:42:00+08:00         8.900000e+01  8.855000e+01            1.005082
+1   adservice                                       app.grpc.mrt                      30                       2  2022-03-21 03:41:00+08:00         2.636923e-03  2.579542e-03            1.022245
+2   adservice                                        app.grpc.sr                      30                       2  2022-03-21 03:30:00+08:00         8.133333e+01  8.028571e+01            1.013049
+3   adservice                                       app.http.mrt                      30                       2  2022-03-21 03:37:00+08:00         9.593750e-03  9.564688e-03            1.003039
+4   adservice  runtime.java_lang_GarbageCollector_CollectionC...                      30                       2  2022-03-21 03:58:00+08:00         4.188033e+04  4.186805e+04            1.000293
+5   adservice  runtime.java_lang_GarbageCollector_CollectionT...                      30                       2  2022-03-21 03:58:00+08:00         6.578108e+04  6.576156e+04            1.000297
+6   adservice  runtime.java_lang_GarbageCollector_LastGcInfo_...                      30                       2  2022-03-21 03:58:00+08:00         2.832851e+08  2.831984e+08            1.000306
+7   adservice  runtime.java_lang_GarbageCollector_LastGcInfo_...                      30                       2  2022-03-21 03:58:00+08:00         4.188033e+04  4.186805e+04            1.000293
+8   adservice  runtime.java_lang_GarbageCollector_LastGcInfo_...                      30                       2  2022-03-21 03:43:00+08:00         1.873813e+05  1.663165e+05            1.126655
+9   adservice  runtime.java_lang_GarbageCollector_LastGcInfo_...                      30                       2  2022-03-21 03:58:00+08:00         1.657489e+07  1.657472e+07            1.000010
+10  adservice  runtime.java_lang_GarbageCollector_LastGcInfo_...                      30                       2  2022-03-21 03:33:00+08:00         2.370513e+05  2.193998e+05            1.080454
+11  adservice  runtime.java_lang_GarbageCollector_LastGcInfo_...                      30                       2  2022-03-21 03:58:00+08:00         1.657487e+07  1.657471e+07            1.000009
+12  adservice  runtime.java_lang_GarbageCollector_LastGcInfo_...                      30                       2  2022-03-21 03:58:00+08:00         2.832851e+08  2.831984e+08            1.000306
+13  adservice  runtime.java_lang_MemoryPool_CollectionUsage_u...                      30                       2  2022-03-21 03:44:00+08:00         2.291933e+05  2.203427e+05            1.040168
+14  adservice  runtime.java_lang_MemoryPool_PeakUsage_used.Te...                      30                       2  2022-03-21 03:58:00+08:00         1.657489e+07  1.657472e+07            1.000010
+15  adservice  runtime.java_lang_MemoryPool_Usage_used.Eden_S...                      30                       2  2022-03-21 03:38:00+08:00         5.097413e+06  5.035148e+06            1.012366
+16  adservice  runtime.java_lang_MemoryPool_Usage_used.Surviv...                      30                       2  2022-03-21 03:44:00+08:00         2.291933e+05  2.203427e+05            1.040168
+17  adservice  runtime.java_lang_MemoryPool_Usage_used.Tenure...                      30                       2  2022-03-21 03:58:00+08:00         1.657489e+07  1.657472e+07            1.000010
+18  adservice      runtime.java_lang_Memory_HeapMemoryUsage_used                      30                       2  2022-03-21 03:41:00+08:00         2.182491e+07  2.180945e+07            1.000708
+19  adservice  runtime.java_lang_Memory_ObjectPendingFinaliza...                      30                       2  2022-03-21 03:44:00+08:00         3.333333e-01  4.583333e-02            7.272727
+2026-07-04 06:03:19,136 | DEBUG | Execution finished. Time cost: 0:00:16.946378
+2026-07-04 06:03:31,614 | DEBUG | Brief Answer:
+```python
+summary = (
+    "Metric anomaly detection summary (incident window 2022-03-21 03:30:00 to 04:00:00 UTC+8):\n\n"
+    "- Anomalies are concentrated in a single service: adservice (multiple KPI groups).\n"
+    "- For the top 20 component-KPI groups: each group had 30 data points in the window and exactly 2 points above its global P95 (anomaly_count = 2).\n"
+    "- Earliest anomaly timestamps across those groups range roughly from 2022-03-21 03:30:00 to 2022-03-21 03:58:00 (UTC+8).\n"
+    "- Maximum values in-window are only slightly above the global P95 for most KPIs (max_over_p95_ratio ≈ 1.00–1.13), indicating small exceedances.\n"
+    "- One notable exception: runtime.java_lang_Memory_ObjectPendingFinalizationCount shows a large spike (max_over_p95_ratio ≈ 7.27), indicating a significant outlier.\n\n"
+    "Conclusion and next steps:\n"
+    "1) Investigate adservice pods (adservice-0/1/2) focusing on JVM/GC and memory-related KPIs, since most anomalies are GC/memory metrics.\n"
+    "2) Pay special attention to the ObjectPendingFinalizationCount spike — correlate with GC logs, application logs, and traces to understand cause.\n"
+    "3) Because each anomaly group only has 2 out of 30 points above P95, these are short-lived spikes; check timestamps and surrounding logs/traces to determine impact.\n"
+    "4) Use the cached full anomaly table (metric_anomaly_full) for deeper filtering and correlation with logs/traces if needed."
+)
+summary
+```
+2026-07-04 06:03:31,614 | INFO | --------------------------------------------------------------------------------
+Step[2]
+### Observation:
+```python
+summary = (
+    "Metric anomaly detection summary (incident window 2022-03-21 03:30:00 to 04:00:00 UTC+8):\n\n"
+    "- Anomalies are concentrated in a single service: adservice (multiple KPI groups).\n"
+    "- For the top 20 component-KPI groups: each group had 30 data points in the window and exactly 2 points above its global P95 (anomaly_count = 2).\n"
+    "- Earliest anomaly timestamps across those groups range roughly from 2022-03-21 03:30:00 to 2022-03-21 03:58:00 (UTC+8).\n"
+    "- Maximum values in-window are only slightly above the global P95 for most KPIs (max_over_p95_ratio ≈ 1.00–1.13), indicating small exceedances.\n"
+    "- One notable exception: runtime.java_lang_Memory_ObjectPendingFinalizationCount shows a large spike (max_over_p95_ratio ≈ 7.27), indicating a significant outlier.\n\n"
+    "Conclusion and next steps:\n"
+    "1) Investigate adservice pods (adservice-0/1/2) focusing on JVM/GC and memory-related KPIs, since most anomalies are GC/memory metrics.\n"
+    "2) Pay special attention to the ObjectPendingFinalizationCount spike — correlate with GC logs, application logs, and traces to understand cause.\n"
+    "3) Because each anomaly group only has 2 out of 30 points above P95, these are short-lived spikes; check timestamps and surrounding logs/traces to determine impact.\n"
+    "4) Use the cached full anomaly table (metric_anomaly_full) for deeper filtering and correlation with logs/traces if needed."
+)
+summary
+```
+
+The original code execution output of IPython Kernel is also provided below for reference:
+
+cmdb_id                                           kpi_name  total_points_in_window  anomaly_count_over_p95 earliest_anomaly_timestamp  max_value_in_window    global_p95  max_over_p95_ratio
+0   adservice                                     app.grpc.count                      30                       2  2022-03-21 03:42:00+08:00         8.900000e+01  8.855000e+01            1.005082
+1   adservice                                       app.grpc.mrt                      30                       2  2022-03-21 03:41:00+08:00         2.636923e-03  2.579542e-03            1.022245
+2   adservice                                        app.grpc.sr                      30                       2  2022-03-21 03:30:00+08:00         8.133333e+01  8.028571e+01            1.013049
+3   adservice                                       app.http.mrt                      30                       2  2022-03-21 03:37:00+08:00         9.593750e-03  9.564688e-03            1.003039
+4   adservice  runtime.java_lang_GarbageCollector_CollectionC...                      30                       2  2022-03-21 03:58:00+08:00         4.188033e+04  4.186805e+04            1.000293
+5   adservice  runtime.java_lang_GarbageCollector_CollectionT...                      30                       2  2022-03-21 03:58:00+08:00         6.578108e+04  6.576156e+04            1.000297
+6   adservice  runtime.java_lang_GarbageCollector_LastGcInfo_...                      30                       2  2022-03-21 03:58:00+08:00         2.832851e+08  2.831984e+08            1.000306
+7   adservice  runtime.java_lang_GarbageCollector_LastGcInfo_...                      30                       2  2022-03-21 03:58:00+08:00         4.188033e+04  4.186805e+04            1.000293
+8   adservice  runtime.java_lang_GarbageCollector_LastGcInfo_...                      30                       2  2022-03-21 03:43:00+08:00         1.873813e+05  1.663165e+05            1.126655
+9   adservice  runtime.java_lang_GarbageCollector_LastGcInfo_...                      30                       2  2022-03-21 03:58:00+08:00         1.657489e+07  1.657472e+07            1.000010
+10  adservice  runtime.java_lang_GarbageCollector_LastGcInfo_...                      30                       2  2022-03-21 03:33:00+08:00         2.370513e+05  2.193998e+05            1.080454
+11  adservice  runtime.java_lang_GarbageCollector_LastGcInfo_...                      30                       2  2022-03-21 03:58:00+08:00         1.657487e+07  1.657471e+07            1.000009
+12  adservice  runtime.java_lang_GarbageCollector_LastGcInfo_...                      30                       2  2022-03-21 03:58:00+08:00         2.832851e+08  2.831984e+08            1.000306
+13  adservice  runtime.java_lang_MemoryPool_CollectionUsage_u...                      30                       2  2022-03-21 03:44:00+08:00         2.291933e+05  2.203427e+05            1.040168
+14  adservice  runtime.java_lang_MemoryPool_PeakUsage_used.Te...                      30                       2  2022-03-21 03:58:00+08:00         1.657489e+07  1.657472e+07            1.000010
+15  adservice  runtime.java_lang_MemoryPool_Usage_used.Eden_S...                      30                       2  2022-03-21 03:38:00+08:00         5.097413e+06  5.035148e+06            1.012366
+16  adservice  runtime.java_lang_MemoryPool_Usage_used.Surviv...                      30                       2  2022-03-21 03:44:00+08:00         2.291933e+05  2.203427e+05            1.040168
+17  adservice  runtime.java_lang_MemoryPool_Usage_used.Tenure...                      30                       2  2022-03-21 03:58:00+08:00         1.657489e+07  1.657472e+07            1.000010
+18  adservice      runtime.java_lang_Memory_HeapMemoryUsage_used                      30                       2  2022-03-21 03:41:00+08:00         2.182491e+07  2.180945e+07            1.000708
+19  adservice  runtime.java_lang_Memory_ObjectPendingFinaliza...                      30                       2  2022-03-21 03:44:00+08:00         3.333333e-01  4.583333e-02            7.272727
+--------------------------------------------------------------------------------
+2026-07-04 06:03:39,326 | DEBUG | Raw Response:
+{
+    "analysis": "Executor's metric-anomaly step examined the incident window and found anomalies concentrated in the adservice service-level metrics. For the top component-KPI groups (service-level adservice) each had 30 points in-window and typically only 2 points > global P95 (short spikes). Most exceedances are small (max_over_p95_ratio ≈ 1.00–1.13), except runtime.java_lang_Memory_ObjectPendingFinalizationCount which shows a large spike (≈7.27× the P95). From this we can derive that the issue likely involves adservice and is related to JVM memory/GC behavior, but we still need to localize to pod(s) and exact timestamp and confirm via traces/logs. The next step is to drill down to adservice at the pod/container level and compute pod-level global thresholds and in-window anomalies to identify which specific pod(s) and KPI(s) show significant faults.",
+    "completed": "False",
+    "instruction": "For all metric cmdb_id values that start with 'adservice' (including adservice, adservice-0, adservice-1, adservice-2, adservice2-0 if present): 1) compute the global P95 of 'value' per (cmdb_id, kpi_name) using the full metric series, 2) filter metric points to the incident window 2022-03-21 03:30:00 to 2022-03-21 04:00:00 (UTC+8), 3) for each (cmdb_id,kpi_name) group compute: total_points_in_window, anomaly_count_over_p95 (points with value > group global P95), earliest_anomaly_timestamp (first timestamp in window with value > P95 or null), max_value_in_window, global_p95, and max_over_p95_ratio = max_value_in_window / global_p95. Return top 20 rows sorted by anomaly_count_over_p95 (descending). Store the full result in a kernel variable for follow-up steps. Limit displayed rows to 20."
+}
+2026-07-04 06:03:39,327 | INFO | --------------------------------------------------------------------------------
+### Step[3]
+Analysis: Executor's metric-anomaly step examined the incident window and found anomalies concentrated in the adservice service-level metrics. For the top component-KPI groups (service-level adservice) each had 30 points in-window and typically only 2 points > global P95 (short spikes). Most exceedances are small (max_over_p95_ratio ≈ 1.00–1.13), except runtime.java_lang_Memory_ObjectPendingFinalizationCount which shows a large spike (≈7.27× the P95). From this we can derive that the issue likely involves adservice and is related to JVM memory/GC behavior, but we still need to localize to pod(s) and exact timestamp and confirm via traces/logs. The next step is to drill down to adservice at the pod/container level and compute pod-level global thresholds and in-window anomalies to identify which specific pod(s) and KPI(s) show significant faults.
+Instruction: For all metric cmdb_id values that start with 'adservice' (including adservice, adservice-0, adservice-1, adservice-2, adservice2-0 if present): 1) compute the global P95 of 'value' per (cmdb_id, kpi_name) using the full metric series, 2) filter metric points to the incident window 2022-03-21 03:30:00 to 2022-03-21 04:00:00 (UTC+8), 3) for each (cmdb_id,kpi_name) group compute: total_points_in_window, anomaly_count_over_p95 (points with value > group global P95), earliest_anomaly_timestamp (first timestamp in window with value > P95 or null), max_value_in_window, global_p95, and max_over_p95_ratio = max_value_in_window / global_p95. Return top 20 rows sorted by anomaly_count_over_p95 (descending). Store the full result in a kernel variable for follow-up steps. Limit displayed rows to 20.
+--------------------------------------------------------------------------------
+2026-07-04 06:03:39,327 | DEBUG | Start execution
+2026-07-04 06:03:58,054 | DEBUG | Raw Code:
+import pandas as pd
+import numpy as np
+import pytz
+
+# Reuse cached variables where available
+try:
+    metric_df
+    ts_to_dt
+    tz
+except NameError as e:
+    raise RuntimeError("Required cached variables (metric_df, ts_to_dt, tz) are missing.") from e
+
+# Ensure numeric
+metric_df['value'] = pd.to_numeric(metric_df['value'], errors='coerce')
+
+# Define adservice prefix filter (includes adservice, adservice-0, adservice2-0, etc.)
+prefix = 'adservice'
+ad_filter = metric_df['cmdb_id'].astype(str).str.startswith(prefix)
+
+# Rule: compute global P95 per (cmdb_id, kpi_name) using the full metric series BEFORE window filtering
+ad_full = metric_df[ad_filter].copy()
+if ad_full.shape[0] == 0:
+    ad_p95 = pd.DataFrame(columns=['cmdb_id','kpi_name','global_p95'])
+else:
+    ad_p95 = ad_full.groupby(['cmdb_id','kpi_name'], sort=False).agg(
+        global_p95=('value', lambda s: float(s.quantile(0.95)) if s.notna().any() else np.nan),
+        full_count=('value','size')
+    ).reset_index()
+
+# Incident window in UTC timestamps (UTC+8 local)
+start_local = tz.localize(pd.Timestamp("2022-03-21 03:30:00"))
+end_local   = tz.localize(pd.Timestamp("2022-03-21 04:00:00"))
+start_ts = int(start_local.tz_convert(pytz.UTC).timestamp())
+end_ts   = int(end_local.tz_convert(pytz.UTC).timestamp())
+
+# Filter adservice points in the incident window [start_ts, end_ts)
+ad_window = metric_df[ad_filter & (metric_df['timestamp'] >= start_ts) & (metric_df['timestamp'] < end_ts)].copy()
+
+# Merge global P95 into windowed points
+ad_window = ad_window.merge(ad_p95[['cmdb_id','kpi_name','global_p95']], on=['cmdb_id','kpi_name'], how='left')
+
+# Function to compute per-group stats
+def stats_for_group(df):
+    total_points = int(df.shape[0])
+    # anomaly condition: global_p95 finite and value > global_p95
+    cond = df['global_p95'].notna() & (df['value'] > df['global_p95'])
+    anomaly_count = int(cond.sum())
+    if anomaly_count > 0:
+        earliest_ts = int(df.loc[cond, 'timestamp'].min())
+        earliest_dt = ts_to_dt(earliest_ts)
+    else:
+        earliest_dt = None
+    max_value = float(df['value'].max()) if df['value'].notna().any() else np.nan
+    gp95 = float(df['global_p95'].iloc[0]) if df['global_p95'].notna().any() else np.nan
+    if pd.isna(gp95) or gp95 == 0 or pd.isna(max_value):
+        ratio = np.nan
+    else:
+        ratio = max_value / gp95
+    return pd.Series({
+        'total_points_in_window': total_points,
+        'anomaly_count_over_p95': anomaly_count,
+        'earliest_anomaly_timestamp': earliest_dt,
+        'max_value_in_window': max_value,
+        'global_p95': gp95,
+        'max_over_p95_ratio': ratio
+    })
+
+# Group and compute stats (if window has data)
+if ad_window.shape[0] > 0:
+    adservice_anomaly_full = ad_window.groupby(['cmdb_id','kpi_name'], sort=False).apply(stats_for_group).reset_index()
+else:
+    adservice_anomaly_full = pd.DataFrame(columns=[
+        'cmdb_id','kpi_name','total_points_in_window','anomaly_count_over_p95',
+        'earliest_anomaly_timestamp','max_value_in_window','global_p95','max_over_p95_ratio'
+    ])
+
+# Sort by anomaly_count desc, then total_points desc, keep top 20 for display
+adservice_anomaly_top20 = adservice_anomaly_full.sort_values(
+    ['anomaly_count_over_p95','total_points_in_window'], ascending=[False, False]
+).reset_index(drop=True).head(20)
+
+# Display compact result (selected columns, at most 20 rows)
+adservice_anomaly_top20[['cmdb_id','kpi_name','total_points_in_window',
+                         'anomaly_count_over_p95','earliest_anomaly_timestamp',
+                         'max_value_in_window','global_p95','max_over_p95_ratio']], adservice_anomaly_full.shape
+2026-07-04 06:03:59,158 | DEBUG | Execution Result:
+(      cmdb_id                                           kpi_name  total_points_in_window  anomaly_count_over_p95 earliest_anomaly_timestamp  max_value_in_window    global_p95  max_over_p95_ratio
+0   adservice                                     app.grpc.count                    30.0                     2.0  2022-03-21 03:42:00+08:00         8.900000e+01  8.855000e+01            1.005082
+1   adservice                                       app.grpc.mrt                    30.0                     2.0  2022-03-21 03:41:00+08:00         2.636923e-03  2.579542e-03            1.022245
+2   adservice                                        app.grpc.sr                    30.0                     2.0  2022-03-21 03:30:00+08:00         8.133333e+01  8.028571e+01            1.013049
+3   adservice                                       app.http.mrt                    30.0                     2.0  2022-03-21 03:37:00+08:00         9.593750e-03  9.564688e-03            1.003039
+4   adservice  runtime.java_lang_GarbageCollector_CollectionC...                    30.0                     2.0  2022-03-21 03:58:00+08:00         4.188033e+04  4.186805e+04            1.000293
+5   adservice  runtime.java_lang_GarbageCollector_CollectionT...                    30.0                     2.0  2022-03-21 03:58:00+08:00         6.578108e+04  6.576156e+04            1.000297
+6   adservice  runtime.java_lang_GarbageCollector_LastGcInfo_...                    30.0                     2.0  2022-03-21 03:58:00+08:00         2.832851e+08  2.831984e+08            1.000306
+7   adservice  runtime.java_lang_GarbageCollector_LastGcInfo_...                    30.0                     2.0  2022-03-21 03:58:00+08:00         4.188033e+04  4.186805e+04            1.000293
+8   adservice  runtime.java_lang_GarbageCollector_LastGcInfo_...                    30.0                     2.0  2022-03-21 03:43:00+08:00         1.873813e+05  1.663165e+05            1.126655
+9   adservice  runtime.java_lang_GarbageCollector_LastGcInfo_...                    30.0                     2.0  2022-03-21 03:58:00+08:00         1.657489e+07  1.657472e+07            1.000010
+10  adservice  runtime.java_lang_GarbageCollector_LastGcInfo_...                    30.0                     2.0  2022-03-21 03:33:00+08:00         2.370513e+05  2.193998e+05            1.080454
+11  adservice  runtime.java_lang_GarbageCollector_LastGcInfo_...                    30.0                     2.0  2022-03-21 03:58:00+08:00         1.657487e+07  1.657471e+07            1.000009
+12  adservice  runtime.java_lang_GarbageCollector_LastGcInfo_...                    30.0                     2.0  2022-03-21 03:58:00+08:00         2.832851e+08  2.831984e+08            1.000306
+13  adservice  runtime.java_lang_MemoryPool_CollectionUsage_u...                    30.0                     2.0  2022-03-21 03:44:00+08:00         2.291933e+05  2.203427e+05            1.040168
+14  adservice  runtime.java_lang_MemoryPool_PeakUsage_used.Te...                    30.0                     2.0  2022-03-21 03:58:00+08:00         1.657489e+07  1.657472e+07            1.000010
+15  adservice  runtime.java_lang_MemoryPool_Usage_used.Eden_S...                    30.0                     2.0  2022-03-21 03:38:00+08:00         5.097413e+06  5.035148e+06            1.012366
+16  adservice  runtime.java_lang_MemoryPool_Usage_used.Surviv...                    30.0                     2.0  2022-03-21 03:44:00+08:00         2.291933e+05  2.203427e+05            1.040168
+17  adservice  runtime.java_lang_MemoryPool_Usage_used.Tenure...                    30.0                     2.0  2022-03-21 03:58:00+08:00         1.657489e+07  1.657472e+07            1.000010
+18  adservice      runtime.java_lang_Memory_HeapMemoryUsage_used                    30.0                     2.0  2022-03-21 03:41:00+08:00         2.182491e+07  2.180945e+07            1.000708
+19  adservice  runtime.java_lang_Memory_ObjectPendingFinaliza...                    30.0                     2.0  2022-03-21 03:44:00+08:00         3.333333e-01  4.583333e-02            7.272727, (1034, 8))
+2026-07-04 06:03:59,158 | DEBUG | Execution finished. Time cost: 0:00:19.831432
+2026-07-04 06:04:08,256 | DEBUG | Brief Answer:
+```python
+# Compact plain-English summary (uses cached variables from prior steps)
+n_groups = adservice_anomaly_full.shape[0] if 'adservice_anomaly_full' in globals() else 0
+n_top = adservice_anomaly_top20.shape[0] if 'adservice_anomaly_top20' in globals() else 0
+
+summary = (
+    f"Adservice metric anomaly summary (incident window 2022-03-21 03:30–04:00 UTC+8):\n\n"
+    f"- Scope: computed global P95 per (cmdb_id, kpi_name) using the full metric series, then evaluated points inside the incident window.\n"
+    f"- Groups analyzed: {n_groups} distinct (cmdb_id, kpi_name) groups matching prefix 'adservice'.\n"
+    f"- Top {n_top} groups (sorted by anomaly count): each top group had 30 points in-window and 2 points above its global P95 (anomaly_count = 2).\n"
+    f"- Severity: most exceedances are very small (max_over_p95_ratio ≈ 1.00–1.13), indicating short, mild spikes.\n"
+    f"- Notable outlier: runtime.java_lang_Memory_ObjectPendingFinalizationCount had a large spike (max_over_p95_ratio ≈ 7.27) — this is a significant anomaly to investigate.\n\n"
+    f"Recommendations:\n"
+    f"1) Focus investigation on adservice JVM/GC and memory-related KPIs (many top anomalies are GC/memory metrics).\n"
+    f"2) Correlate the earliest anomaly timestamps (shown in the top table) with application logs and traces to identify root cause.\n"
+    f"3) Use the full result table 'adservice_anomaly_full' (cached) for filtering, pivoting, and correlation with logs/traces for deeper analysis.\n"
+)
+summary
+```
+2026-07-04 06:04:08,256 | INFO | --------------------------------------------------------------------------------
+Step[3]
+### Observation:
+```python
+# Compact plain-English summary (uses cached variables from prior steps)
+n_groups = adservice_anomaly_full.shape[0] if 'adservice_anomaly_full' in globals() else 0
+n_top = adservice_anomaly_top20.shape[0] if 'adservice_anomaly_top20' in globals() else 0
+
+summary = (
+    f"Adservice metric anomaly summary (incident window 2022-03-21 03:30–04:00 UTC+8):\n\n"
+    f"- Scope: computed global P95 per (cmdb_id, kpi_name) using the full metric series, then evaluated points inside the incident window.\n"
+    f"- Groups analyzed: {n_groups} distinct (cmdb_id, kpi_name) groups matching prefix 'adservice'.\n"
+    f"- Top {n_top} groups (sorted by anomaly count): each top group had 30 points in-window and 2 points above its global P95 (anomaly_count = 2).\n"
+    f"- Severity: most exceedances are very small (max_over_p95_ratio ≈ 1.00–1.13), indicating short, mild spikes.\n"
+    f"- Notable outlier: runtime.java_lang_Memory_ObjectPendingFinalizationCount had a large spike (max_over_p95_ratio ≈ 7.27) — this is a significant anomaly to investigate.\n\n"
+    f"Recommendations:\n"
+    f"1) Focus investigation on adservice JVM/GC and memory-related KPIs (many top anomalies are GC/memory metrics).\n"
+    f"2) Correlate the earliest anomaly timestamps (shown in the top table) with application logs and traces to identify root cause.\n"
+    f"3) Use the full result table 'adservice_anomaly_full' (cached) for filtering, pivoting, and correlation with logs/traces for deeper analysis.\n"
+)
+summary
+```
+
+The original code execution output of IPython Kernel is also provided below for reference:
+
+(      cmdb_id                                           kpi_name  total_points_in_window  anomaly_count_over_p95 earliest_anomaly_timestamp  max_value_in_window    global_p95  max_over_p95_ratio
+0   adservice                                     app.grpc.count                    30.0                     2.0  2022-03-21 03:42:00+08:00         8.900000e+01  8.855000e+01            1.005082
+1   adservice                                       app.grpc.mrt                    30.0                     2.0  2022-03-21 03:41:00+08:00         2.636923e-03  2.579542e-03            1.022245
+2   adservice                                        app.grpc.sr                    30.0                     2.0  2022-03-21 03:30:00+08:00         8.133333e+01  8.028571e+01            1.013049
+3   adservice                                       app.http.mrt                    30.0                     2.0  2022-03-21 03:37:00+08:00         9.593750e-03  9.564688e-03            1.003039
+4   adservice  runtime.java_lang_GarbageCollector_CollectionC...                    30.0                     2.0  2022-03-21 03:58:00+08:00         4.188033e+04  4.186805e+04            1.000293
+5   adservice  runtime.java_lang_GarbageCollector_CollectionT...                    30.0                     2.0  2022-03-21 03:58:00+08:00         6.578108e+04  6.576156e+04            1.000297
+6   adservice  runtime.java_lang_GarbageCollector_LastGcInfo_...                    30.0                     2.0  2022-03-21 03:58:00+08:00         2.832851e+08  2.831984e+08            1.000306
+7   adservice  runtime.java_lang_GarbageCollector_LastGcInfo_...                    30.0                     2.0  2022-03-21 03:58:00+08:00         4.188033e+04  4.186805e+04            1.000293
+8   adservice  runtime.java_lang_GarbageCollector_LastGcInfo_...                    30.0                     2.0  2022-03-21 03:43:00+08:00         1.873813e+05  1.663165e+05            1.126655
+9   adservice  runtime.java_lang_GarbageCollector_LastGcInfo_...                    30.0                     2.0  2022-03-21 03:58:00+08:00         1.657489e+07  1.657472e+07            1.000010
+10  adservice  runtime.java_lang_GarbageCollector_LastGcInfo_...                    30.0                     2.0  2022-03-21 03:33:00+08:00         2.370513e+05  2.193998e+05            1.080454
+11  adservice  runtime.java_lang_GarbageCollector_LastGcInfo_...                    30.0                     2.0  2022-03-21 03:58:00+08:00         1.657487e+07  1.657471e+07            1.000009
+12  adservice  runtime.java_lang_GarbageCollector_LastGcInfo_...                    30.0                     2.0  2022-03-21 03:58:00+08:00         2.832851e+08  2.831984e+08            1.000306
+13  adservice  runtime.java_lang_MemoryPool_CollectionUsage_u...                    30.0                     2.0  2022-03-21 03:44:00+08:00         2.291933e+05  2.203427e+05            1.040168
+14  adservice  runtime.java_lang_MemoryPool_PeakUsage_used.Te...                    30.0                     2.0  2022-03-21 03:58:00+08:00         1.657489e+07  1.657472e+07            1.000010
+15  adservice  runtime.java_lang_MemoryPool_Usage_used.Eden_S...                    30.0                     2.0  2022-03-21 03:38:00+08:00         5.097413e+06  5.035148e+06            1.012366
+16  adservice  runtime.java_lang_MemoryPool_Usage_used.Surviv...                    30.0                     2.0  2022-03-21 03:44:00+08:00         2.291933e+05  2.203427e+05            1.040168
+17  adservice  runtime.java_lang_MemoryPool_Usage_used.Tenure...                    30.0                     2.0  2022-03-21 03:58:00+08:00         1.657489e+07  1.657472e+07            1.000010
+18  adservice      runtime.java_lang_Memory_HeapMemoryUsage_used                    30.0                     2.0  2022-03-21 03:41:00+08:00         2.182491e+07  2.180945e+07            1.000708
+19  adservice  runtime.java_lang_Memory_ObjectPendingFinaliza...                    30.0                     2.0  2022-03-21 03:44:00+08:00         3.333333e-01  4.583333e-02            7.272727, (1034, 8))
+--------------------------------------------------------------------------------
+2026-07-04 06:04:15,324 | DEBUG | Raw Response:
+{
+    "analysis": "Previous Executor steps loaded all telemetry files, computed global P95s per component-KPI, and ran anomaly detection for the incident window. Results show anomalies concentrated in the adservice service: many JVM/GC and memory KPIs for adservice exceeded global P95 briefly (typically 2 points out of 30). Most breaches are small (≈1.0–1.13×P95) except runtime.java_lang_Memory_ObjectPendingFinalizationCount which had a large spike (~7.27×P95) with earliest anomaly at 2022-03-21 03:44:00+08:00. From this we can infer the failure likely relates to adservice JVM/GC/memory behavior, but we have not yet localized to a specific pod (adservice-0/1/2) nor confirmed exact occurrence time and root cause reason. The next logical step is to localize the anomalous JVM/memory metrics to individual adservice pods and record precise earliest anomaly timestamps and severity per pod for the most relevant KPIs (ObjectPendingFinalizationCount, HeapMemoryUsage_used, MemoryPool usages, and key GC KPIs).",
+    "completed": "False",
+    "instruction": "For component IDs that start with 'adservice' at pod level (adservice-0, adservice-1, adservice-2 where present) do the following atomically: 1) For each (cmdb_id,kpi_name) where kpi_name matches any of these substrings: 'ObjectPendingFinalizationCount', 'HeapMemoryUsage_used', 'MemoryPool_Usage_used', 'GarbageCollector', 'CollectionT', or 'CollectionC', compute the global P95 of value using the full metric series (not filtered). 2) Filter metric points to the incident window 2022-03-21 03:30:00 to 2022-03-21 04:00:00 (UTC+8). 3) For each group output: cmdb_id, kpi_name, total_points_in_window, anomaly_count_over_p95 (value > group global P95), earliest_anomaly_timestamp (first in-window >P95 or null), max_value_in_window, global_p95, max_over_p95_ratio (max_value_in_window / global_p95). 4) Return top 20 rows sorted by max_over_p95_ratio (descending). Store the full resulting table in a kernel variable for follow-up steps. Limit displayed rows to 20."
+}
+2026-07-04 06:04:15,324 | INFO | --------------------------------------------------------------------------------
+### Step[4]
+Analysis: Previous Executor steps loaded all telemetry files, computed global P95s per component-KPI, and ran anomaly detection for the incident window. Results show anomalies concentrated in the adservice service: many JVM/GC and memory KPIs for adservice exceeded global P95 briefly (typically 2 points out of 30). Most breaches are small (≈1.0–1.13×P95) except runtime.java_lang_Memory_ObjectPendingFinalizationCount which had a large spike (~7.27×P95) with earliest anomaly at 2022-03-21 03:44:00+08:00. From this we can infer the failure likely relates to adservice JVM/GC/memory behavior, but we have not yet localized to a specific pod (adservice-0/1/2) nor confirmed exact occurrence time and root cause reason. The next logical step is to localize the anomalous JVM/memory metrics to individual adservice pods and record precise earliest anomaly timestamps and severity per pod for the most relevant KPIs (ObjectPendingFinalizationCount, HeapMemoryUsage_used, MemoryPool usages, and key GC KPIs).
+Instruction: For component IDs that start with 'adservice' at pod level (adservice-0, adservice-1, adservice-2 where present) do the following atomically: 1) For each (cmdb_id,kpi_name) where kpi_name matches any of these substrings: 'ObjectPendingFinalizationCount', 'HeapMemoryUsage_used', 'MemoryPool_Usage_used', 'GarbageCollector', 'CollectionT', or 'CollectionC', compute the global P95 of value using the full metric series (not filtered). 2) Filter metric points to the incident window 2022-03-21 03:30:00 to 2022-03-21 04:00:00 (UTC+8). 3) For each group output: cmdb_id, kpi_name, total_points_in_window, anomaly_count_over_p95 (value > group global P95), earliest_anomaly_timestamp (first in-window >P95 or null), max_value_in_window, global_p95, max_over_p95_ratio (max_value_in_window / global_p95). 4) Return top 20 rows sorted by max_over_p95_ratio (descending). Store the full resulting table in a kernel variable for follow-up steps. Limit displayed rows to 20.
+--------------------------------------------------------------------------------
+2026-07-04 06:04:15,325 | DEBUG | Start execution
+2026-07-04 06:04:29,780 | DEBUG | Raw Code:
+import pandas as pd
+import numpy as np
+import pytz
+
+# Reuse cached variables where possible
+try:
+    metric_df
+    ts_to_dt
+    tz
+except NameError:
+    tz = pytz.timezone('Asia/Shanghai')
+    # helper datetime converter
+    def ts_to_dt(ts):
+        return pd.to_datetime(int(ts), unit='s', utc=True).tz_convert(tz)
+
+# Ensure numeric values
+metric_df['value'] = pd.to_numeric(metric_df['value'], errors='coerce')
+
+# Select pod-level adservice components: those starting with 'adservice-'
+pod_mask = metric_df['cmdb_id'].astype(str).str.startswith('adservice-')
+ad_pods_full = metric_df[pod_mask].copy()
+
+# KPI substring filter (case-sensitive substrings)
+substrs = [
+    'ObjectPendingFinalizationCount',
+    'HeapMemoryUsage_used',
+    'MemoryPool_Usage_used',
+    'GarbageCollector',
+    'CollectionT',
+    'CollectionC'
+]
+pattern = '(' + '|'.join(substrs) + ')'
+
+# Keep only rows whose kpi_name contains any of the substrings
+ad_pods_full = ad_pods_full[ad_pods_full['kpi_name'].astype(str).str.contains(pattern, regex=True)]
+
+# Compute global P95 per (cmdb_id, kpi_name) using the full series (before window filtering)
+if ad_pods_full.shape[0] > 0:
+    pod_p95 = ad_pods_full.groupby(['cmdb_id', 'kpi_name'], sort=False).agg(
+        global_p95=('value', lambda s: float(s.quantile(0.95)) if s.notna().any() else np.nan),
+        full_count=('value', 'size')
+    ).reset_index()
+else:
+    pod_p95 = pd.DataFrame(columns=['cmdb_id','kpi_name','global_p95','full_count'])
+
+# Define incident window [2022-03-21 03:30:00, 2022-03-21 04:00:00) in UTC epoch seconds
+start_local = tz.localize(pd.Timestamp("2022-03-21 03:30:00"))
+end_local   = tz.localize(pd.Timestamp("2022-03-21 04:00:00"))
+start_ts = int(start_local.tz_convert(pytz.UTC).timestamp())
+end_ts   = int(end_local.tz_convert(pytz.UTC).timestamp())
+
+# Filter original metric_df to pods & kpis then to the incident window
+ad_pods_window = metric_df[
+    metric_df['cmdb_id'].astype(str).str.startswith('adservice-') &
+    metric_df['kpi_name'].astype(str).str.contains(pattern, regex=True) &
+    (metric_df['timestamp'] >= start_ts) &
+    (metric_df['timestamp'] < end_ts)
+].copy()
+
+# Merge global p95 into windowed data
+ad_pods_window = ad_pods_window.merge(pod_p95[['cmdb_id','kpi_name','global_p95']], on=['cmdb_id','kpi_name'], how='left')
+
+# Per-group stats function
+def pod_group_stats(df):
+    total_points = int(df.shape[0])
+    cond = df['global_p95'].notna() & (df['value'] > df['global_p95'])
+    anomaly_count = int(cond.sum())
+    if anomaly_count > 0:
+        earliest_ts = int(df.loc[cond, 'timestamp'].min())
+        earliest_dt = ts_to_dt(earliest_ts)
+    else:
+        earliest_dt = None
+    max_value = float(df['value'].max()) if df['value'].notna().any() else np.nan
+    gp95 = float(df['global_p95'].iloc[0]) if df['global_p95'].notna().any() else np.nan
+    if pd.isna(gp95) or gp95 == 0 or pd.isna(max_value):
+        ratio = np.nan
+    else:
+        ratio = max_value / gp95
+    return pd.Series({
+        'total_points_in_window': total_points,
+        'anomaly_count_over_p95': anomaly_count,
+        'earliest_anomaly_timestamp': earliest_dt,
+        'max_value_in_window': max_value,
+        'global_p95': gp95,
+        'max_over_p95_ratio': ratio
+    })
+
+# Group and compute stats
+if ad_pods_window.shape[0] > 0:
+    pod_adservice_anomaly_full = ad_pods_window.groupby(['cmdb_id','kpi_name'], sort=False).apply(pod_group_stats).reset_index()
+else:
+    pod_adservice_anomaly_full = pd.DataFrame(columns=[
+        'cmdb_id','kpi_name','total_points_in_window','anomaly_count_over_p95',
+        'earliest_anomaly_timestamp','max_value_in_window','global_p95','max_over_p95_ratio'
+    ])
+
+# Sort by max_over_p95_ratio descending and take top 20 for display
+pod_adservice_anomaly_top20 = pod_adservice_anomaly_full.sort_values(
+    'max_over_p95_ratio', ascending=False
+).reset_index(drop=True).head(20)
+
+# Display compact result (selected columns, at most 20 rows) and keep full table for follow-up
+pod_adservice_anomaly_top20[['cmdb_id','kpi_name','total_points_in_window',
+                             'anomaly_count_over_p95','earliest_anomaly_timestamp',
+                             'max_value_in_window','global_p95','max_over_p95_ratio']], pod_adservice_anomaly_full.shape
+2026-07-04 06:04:29,919 | DEBUG | Execution Result:
+(Empty DataFrame
+Columns: [cmdb_id, kpi_name, total_points_in_window, anomaly_count_over_p95, earliest_anomaly_timestamp, max_value_in_window, global_p95, max_over_p95_ratio]
+Index: [], (0, 8))
+2026-07-04 06:04:29,919 | DEBUG | Execution finished. Time cost: 0:00:14.593988
+2026-07-04 06:04:38,070 | DEBUG | Brief Answer:
+summary = (
+    "Result: No pod-level adservice metrics matched the requested KPI substrings within the incident window.\n\n"
+    "- The produced table 'pod_adservice_anomaly_full' is empty (0 rows), so there are no (cmdb_id,kpi_name) pod-level groups\n"
+    "  (e.g., adservice-0/1/2) with KPI names containing any of: ObjectPendingFinalizationCount, HeapMemoryUsage_used,\n"
+    "  MemoryPool_Usage_used, GarbageCollector, CollectionT, or CollectionC in the 2022-03-21 03:30–04:00 UTC+8 window.\n\n"
+    "Recommended next steps:\n"
+    "1) Verify whether these JVM/GC KPIs exist at the service-level 'adservice' (not pod-level) in the full metric set.\n"
+    "2) If pod-level metrics are expected but missing, check metric ingestion and naming conventions (pod id suffixes like adservice-0 vs adservice).\n"
+    "3) You can search the full metric index for matching KPI name patterns across all cmdb_id values to locate where these KPIs are recorded.\n"
+)
+summary
+2026-07-04 06:04:38,071 | INFO | --------------------------------------------------------------------------------
+Step[4]
+### Observation:
+summary = (
+    "Result: No pod-level adservice metrics matched the requested KPI substrings within the incident window.\n\n"
+    "- The produced table 'pod_adservice_anomaly_full' is empty (0 rows), so there are no (cmdb_id,kpi_name) pod-level groups\n"
+    "  (e.g., adservice-0/1/2) with KPI names containing any of: ObjectPendingFinalizationCount, HeapMemoryUsage_used,\n"
+    "  MemoryPool_Usage_used, GarbageCollector, CollectionT, or CollectionC in the 2022-03-21 03:30–04:00 UTC+8 window.\n\n"
+    "Recommended next steps:\n"
+    "1) Verify whether these JVM/GC KPIs exist at the service-level 'adservice' (not pod-level) in the full metric set.\n"
+    "2) If pod-level metrics are expected but missing, check metric ingestion and naming conventions (pod id suffixes like adservice-0 vs adservice).\n"
+    "3) You can search the full metric index for matching KPI name patterns across all cmdb_id values to locate where these KPIs are recorded.\n"
+)
+summary
+
+The original code execution output of IPython Kernel is also provided below for reference:
+
+(Empty DataFrame
+Columns: [cmdb_id, kpi_name, total_points_in_window, anomaly_count_over_p95, earliest_anomaly_timestamp, max_value_in_window, global_p95, max_over_p95_ratio]
+Index: [], (0, 8))
+--------------------------------------------------------------------------------
+2026-07-04 06:04:47,811 | DEBUG | Raw Response:
+{
+    "analysis": "Executor attempted to localize JVM/GC/memory anomalies to adservice pods but found no pod-level metrics matching the requested JVM/GC KPI name patterns; the JVM/GC anomalies appear recorded at the service-level 'adservice' (not per-pod). Metric analysis so far shows short-lived spikes concentrated in adservice, with the most significant spike being runtime.java_lang_Memory_ObjectPendingFinalizationCount at 2022-03-21 03:44:00+08 (max ≈7.27×P95). This suggests the root cause is likely within the adservice JVM (service-level) around ~03:44+08, but we have not yet used traces or logs to confirm whether adservice is the root cause component in the call chain or whether this issue propagated from another service/node. According to the workflow, the next step is trace analysis to see whether traces involving adservice show downstream failures (error rates, latency, drops) and to locate the most downstream faulty service in call chains.",
+    "completed": "False",
+    "instruction": "Scan trace.csv for trace_name entries that contain the substring 'adservice' (case-sensitive). For each matching trace_name do the following atomically: 1) compute the global P95 of 'value' using the full trace series for that trace_name (do not filter by window to compute P95), 2) filter points to the incident window 2022-03-21 03:30:00 to 2022-03-21 04:00:00 (UTC+8), 3) compute: total_points_in_window, anomaly_count_over_p95 (points with value > global P95), earliest_anomaly_timestamp (first in-window > P95 or null), max_value_in_window, global_p95, max_over_p95_ratio = max_value_in_window / global_p95. Return the top 20 trace_name groups sorted by anomaly_count_over_p95 (descending). Include columns: trace_name, total_points_in_window, anomaly_count_over_p95, earliest_anomaly_timestamp, max_value_in_window, global_p95, max_over_p95_ratio. Store the full resulting table in a kernel variable for follow-up steps. Limit displayed rows to 20."
+}
+2026-07-04 06:04:47,812 | INFO | --------------------------------------------------------------------------------
+### Step[5]
+Analysis: Executor attempted to localize JVM/GC/memory anomalies to adservice pods but found no pod-level metrics matching the requested JVM/GC KPI name patterns; the JVM/GC anomalies appear recorded at the service-level 'adservice' (not per-pod). Metric analysis so far shows short-lived spikes concentrated in adservice, with the most significant spike being runtime.java_lang_Memory_ObjectPendingFinalizationCount at 2022-03-21 03:44:00+08 (max ≈7.27×P95). This suggests the root cause is likely within the adservice JVM (service-level) around ~03:44+08, but we have not yet used traces or logs to confirm whether adservice is the root cause component in the call chain or whether this issue propagated from another service/node. According to the workflow, the next step is trace analysis to see whether traces involving adservice show downstream failures (error rates, latency, drops) and to locate the most downstream faulty service in call chains.
+Instruction: Scan trace.csv for trace_name entries that contain the substring 'adservice' (case-sensitive). For each matching trace_name do the following atomically: 1) compute the global P95 of 'value' using the full trace series for that trace_name (do not filter by window to compute P95), 2) filter points to the incident window 2022-03-21 03:30:00 to 2022-03-21 04:00:00 (UTC+8), 3) compute: total_points_in_window, anomaly_count_over_p95 (points with value > global P95), earliest_anomaly_timestamp (first in-window > P95 or null), max_value_in_window, global_p95, max_over_p95_ratio = max_value_in_window / global_p95. Return the top 20 trace_name groups sorted by anomaly_count_over_p95 (descending). Include columns: trace_name, total_points_in_window, anomaly_count_over_p95, earliest_anomaly_timestamp, max_value_in_window, global_p95, max_over_p95_ratio. Store the full resulting table in a kernel variable for follow-up steps. Limit displayed rows to 20.
+--------------------------------------------------------------------------------
+2026-07-04 06:04:47,812 | DEBUG | Start execution
+2026-07-04 06:04:59,436 | DEBUG | Raw Code:
+import pandas as pd
+import numpy as np
+import pytz
+
+# Reuse cached variables if available; otherwise try to load trace.csv
+try:
+    trace_df
+except NameError:
+    trace_df = pd.read_csv('trace.csv')
+
+# Ensure timezone per rule
+tz = pytz.timezone('Asia/Shanghai')
+
+# Ensure helper ts_to_dt exists or define it
+try:
+    ts_to_dt
+except NameError:
+    def ts_to_dt(ts):
+        return pd.to_datetime(int(ts), unit='s', utc=True).tz_convert(tz)
+
+# Ensure 'value' is numeric
+trace_df['value'] = pd.to_numeric(trace_df['value'], errors='coerce')
+
+# Find trace_name entries that contain substring 'adservice' (case-sensitive)
+mask_ad = trace_df['trace_name'].astype(str).str.contains('adservice', regex=False)
+trace_names_ad = trace_df.loc[mask_ad, 'trace_name'].unique()
+
+# If none found, create empty result
+if len(trace_names_ad) == 0:
+    trace_adservice_full = pd.DataFrame(columns=[
+        'trace_name','total_points_in_window','anomaly_count_over_p95',
+        'earliest_anomaly_timestamp','max_value_in_window','global_p95','max_over_p95_ratio'
+    ])
+    trace_adservice_top20 = trace_adservice_full.copy()
+else:
+    # 1) Compute global P95 per trace_name using the full trace series (global threshold)
+    global_p95_df = trace_df.groupby('trace_name', sort=False)['value'].quantile(0.95).reset_index()
+    global_p95_df.columns = ['trace_name', 'global_p95']
+
+    # 2) Filter points to the incident window [2022-03-21 03:30:00, 2022-03-21 04:00:00) in UTC+8
+    start_local = tz.localize(pd.Timestamp("2022-03-21 03:30:00"))
+    end_local   = tz.localize(pd.Timestamp("2022-03-21 04:00:00"))
+    start_ts = int(start_local.tz_convert(pytz.UTC).timestamp())
+    end_ts   = int(end_local.tz_convert(pytz.UTC).timestamp())
+
+    trace_window = trace_df[
+        (trace_df['timestamp'] >= start_ts) &
+        (trace_df['timestamp'] < end_ts) &
+        mask_ad
+    ].copy()
+
+    # Merge global p95 into windowed rows (only for trace_names containing 'adservice')
+    trace_window = trace_window.merge(global_p95_df, on='trace_name', how='left')
+
+    # 3) Compute required stats per trace_name
+    def compute_stats(df):
+        total_points = int(df.shape[0])
+        cond = df['global_p95'].notna() & (df['value'] > df['global_p95'])
+        anomaly_count = int(cond.sum())
+        if anomaly_count > 0:
+            earliest_ts = int(df.loc[cond, 'timestamp'].min())
+            earliest_dt = ts_to_dt(earliest_ts)
+        else:
+            earliest_dt = None
+        max_value = float(df['value'].max()) if df['value'].notna().any() else np.nan
+        gp95 = float(df['global_p95'].iloc[0]) if df['global_p95'].notna().any() else np.nan
+        if pd.isna(gp95) or gp95 == 0 or pd.isna(max_value):
+            ratio = np.nan
+        else:
+            ratio = max_value / gp95
+        return pd.Series({
+            'total_points_in_window': total_points,
+            'anomaly_count_over_p95': anomaly_count,
+            'earliest_anomaly_timestamp': earliest_dt,
+            'max_value_in_window': max_value,
+            'global_p95': gp95,
+            'max_over_p95_ratio': ratio
+        })
+
+    if trace_window.shape[0] > 0:
+        trace_adservice_full = trace_window.groupby('trace_name', sort=False).apply(compute_stats).reset_index()
+    else:
+        trace_adservice_full = pd.DataFrame(columns=[
+            'trace_name','total_points_in_window','anomaly_count_over_p95',
+            'earliest_anomaly_timestamp','max_value_in_window','global_p95','max_over_p95_ratio'
+        ])
+
+    # 4) Return top 20 trace_name groups sorted by anomaly_count_over_p95 descending
+    trace_adservice_top20 = trace_adservice_full.sort_values(
+        ['anomaly_count_over_p95','total_points_in_window'], ascending=[False, False]
+    ).reset_index(drop=True).head(20)
+
+# Display compact top-20 result (stored full table in trace_adservice_full)
+trace_adservice_top20[['trace_name','total_points_in_window','anomaly_count_over_p95',
+                       'earliest_anomaly_timestamp','max_value_in_window','global_p95','max_over_p95_ratio']]
+2026-07-04 06:04:59,497 | DEBUG | Execution Result:
+trace_name  total_points_in_window  anomaly_count_over_p95 earliest_anomaly_timestamp  max_value_in_window  global_p95  max_over_p95_ratio
+0    trace.to_adservice-0.duration_mean                    90.0                     5.0  2022-03-21 03:41:00+08:00             0.000028    0.000019            1.509434
+1     trace.to_adservice-0.duration_p95                    90.0                     5.0  2022-03-21 03:41:00+08:00             0.000097    0.000031            3.118971
+2    trace.to_adservice-1.duration_mean                    90.0                     5.0  2022-03-21 03:30:00+08:00             0.000036    0.000015            2.474227
+3    trace.to_adservice-2.duration_mean                    90.0                     5.0  2022-03-21 03:35:00+08:00             0.000017    0.000015            1.168385
+4     trace.to_adservice-2.duration_p95                    90.0                     5.0  2022-03-21 03:35:00+08:00             0.000031    0.000021            1.508516
+5        trace.to_adservice-2.row_count                    90.0                     5.0  2022-03-21 03:30:00+08:00            12.000000    9.550000            1.256545
+6        trace.to_adservice-0.row_count                    90.0                     3.0  2022-03-21 03:32:00+08:00            11.000000   10.000000            1.100000
+7     trace.to_adservice-1.duration_p95                    90.0                     3.0  2022-03-21 03:30:00+08:00             0.000133    0.000021            6.333333
+8        trace.to_adservice-1.row_count                    90.0                     2.0  2022-03-21 03:32:00+08:00            12.000000   10.000000            1.200000
+9   trace.to_adservice2-0.duration_mean                    30.0                     2.0  2022-03-21 03:32:00+08:00             0.000034    0.000033            1.044547
+10   trace.to_adservice2-0.duration_p95                    30.0                     2.0  2022-03-21 03:35:00+08:00             0.000060    0.000058            1.032702
+11      trace.to_adservice2-0.row_count                    30.0                     1.0  2022-03-21 03:58:00+08:00            35.000000   31.000000            1.129032
+12      trace.to_adservice-0.error_rate                    90.0                     0.0                        NaT             0.000000    0.000000                 NaN
+13      trace.to_adservice-1.error_rate                    90.0                     0.0                        NaT             0.000000    0.000000                 NaN
+14      trace.to_adservice-2.error_rate                    90.0                     0.0                        NaT             0.000000    0.000000                 NaN
+15     trace.to_adservice2-0.error_rate                    30.0                     0.0                        NaT             0.000000    0.000000                 NaN
+2026-07-04 06:04:59,497 | DEBUG | Execution finished. Time cost: 0:00:11.684712
+2026-07-04 06:05:05,852 | DEBUG | Brief Answer:
+summary = (
+    "Trace scan for names containing 'adservice' (incident window 2022-03-21 03:30–04:00 UTC+8):\n\n"
+    "- Several trace groups to adservice show anomalies (points > global P95) during the window.\n"
+    "- Highest anomaly counts (5 points over P95) observed for:\n"
+    "  * trace.to_adservice-0.duration_mean and trace.to_adservice-0.duration_p95 (90 points in-window, 5 anomalies)\n"
+    "  * trace.to_adservice-1.duration_mean and trace.to_adservice-2.duration_mean (90 points, 5 anomalies)\n"
+    "  * trace.to_adservice-2.duration_p95 (90 points, 5 anomalies)\n"
+    "- Largest severity by ratio (max_value / global_p95):\n"
+    "  * trace.to_adservice-1.duration_p95 — ratio ≈ 6.33 (max in-window much larger than global P95)\n"
+    "  * trace.to_adservice-0.duration_p95 — ratio ≈ 3.12\n"
+    "  * trace.to_adservice-0.duration_mean and trace.to_adservice-1.duration_mean — ratios ≈ 1.51 and 2.47 respectively\n"
+    "- Row-count anomalies: some trace.to_adservice-*.row_count groups exceeded their global P95 (ratios ≈ 1.10–1.26), with max row_count values up to 35 for adservice2-0.\n"
+    "- Error rates for these traces were zero in-window and had no anomalies.\n"
+    "- Earliest anomaly timestamps vary (examples): 03:30, 03:32, 03:35, 03:41, 03:44 (all UTC+8).\n\n"
+    "Conclusion & next steps:\n"
+    "1) Focus on latency spikes to adservice (duration_mean / duration_p95), especially trace.to_adservice-1.duration_p95 (highest ratio) and trace.to_adservice-0.duration_p95.\n"
+    "2) Correlate these timestamps with application logs, GC/memory metrics (adservice JVM metrics), and upstream request volume (row_count) to identify cause.\n"
+    "3) Use the cached full result table 'trace_adservice_full' for further filtering and correlation (it contains per-trace global P95 and in-window stats).\n"
+)
+summary, trace_adservice_top20.head(20)
+2026-07-04 06:05:05,853 | INFO | --------------------------------------------------------------------------------
+Step[5]
+### Observation:
+summary = (
+    "Trace scan for names containing 'adservice' (incident window 2022-03-21 03:30–04:00 UTC+8):\n\n"
+    "- Several trace groups to adservice show anomalies (points > global P95) during the window.\n"
+    "- Highest anomaly counts (5 points over P95) observed for:\n"
+    "  * trace.to_adservice-0.duration_mean and trace.to_adservice-0.duration_p95 (90 points in-window, 5 anomalies)\n"
+    "  * trace.to_adservice-1.duration_mean and trace.to_adservice-2.duration_mean (90 points, 5 anomalies)\n"
+    "  * trace.to_adservice-2.duration_p95 (90 points, 5 anomalies)\n"
+    "- Largest severity by ratio (max_value / global_p95):\n"
+    "  * trace.to_adservice-1.duration_p95 — ratio ≈ 6.33 (max in-window much larger than global P95)\n"
+    "  * trace.to_adservice-0.duration_p95 — ratio ≈ 3.12\n"
+    "  * trace.to_adservice-0.duration_mean and trace.to_adservice-1.duration_mean — ratios ≈ 1.51 and 2.47 respectively\n"
+    "- Row-count anomalies: some trace.to_adservice-*.row_count groups exceeded their global P95 (ratios ≈ 1.10–1.26), with max row_count values up to 35 for adservice2-0.\n"
+    "- Error rates for these traces were zero in-window and had no anomalies.\n"
+    "- Earliest anomaly timestamps vary (examples): 03:30, 03:32, 03:35, 03:41, 03:44 (all UTC+8).\n\n"
+    "Conclusion & next steps:\n"
+    "1) Focus on latency spikes to adservice (duration_mean / duration_p95), especially trace.to_adservice-1.duration_p95 (highest ratio) and trace.to_adservice-0.duration_p95.\n"
+    "2) Correlate these timestamps with application logs, GC/memory metrics (adservice JVM metrics), and upstream request volume (row_count) to identify cause.\n"
+    "3) Use the cached full result table 'trace_adservice_full' for further filtering and correlation (it contains per-trace global P95 and in-window stats).\n"
+)
+summary, trace_adservice_top20.head(20)
+
+The original code execution output of IPython Kernel is also provided below for reference:
+
+trace_name  total_points_in_window  anomaly_count_over_p95 earliest_anomaly_timestamp  max_value_in_window  global_p95  max_over_p95_ratio
+0    trace.to_adservice-0.duration_mean                    90.0                     5.0  2022-03-21 03:41:00+08:00             0.000028    0.000019            1.509434
+1     trace.to_adservice-0.duration_p95                    90.0                     5.0  2022-03-21 03:41:00+08:00             0.000097    0.000031            3.118971
+2    trace.to_adservice-1.duration_mean                    90.0                     5.0  2022-03-21 03:30:00+08:00             0.000036    0.000015            2.474227
+3    trace.to_adservice-2.duration_mean                    90.0                     5.0  2022-03-21 03:35:00+08:00             0.000017    0.000015            1.168385
+4     trace.to_adservice-2.duration_p95                    90.0                     5.0  2022-03-21 03:35:00+08:00             0.000031    0.000021            1.508516
+5        trace.to_adservice-2.row_count                    90.0                     5.0  2022-03-21 03:30:00+08:00            12.000000    9.550000            1.256545
+6        trace.to_adservice-0.row_count                    90.0                     3.0  2022-03-21 03:32:00+08:00            11.000000   10.000000            1.100000
+7     trace.to_adservice-1.duration_p95                    90.0                     3.0  2022-03-21 03:30:00+08:00             0.000133    0.000021            6.333333
+8        trace.to_adservice-1.row_count                    90.0                     2.0  2022-03-21 03:32:00+08:00            12.000000   10.000000            1.200000
+9   trace.to_adservice2-0.duration_mean                    30.0                     2.0  2022-03-21 03:32:00+08:00             0.000034    0.000033            1.044547
+10   trace.to_adservice2-0.duration_p95                    30.0                     2.0  2022-03-21 03:35:00+08:00             0.000060    0.000058            1.032702
+11      trace.to_adservice2-0.row_count                    30.0                     1.0  2022-03-21 03:58:00+08:00            35.000000   31.000000            1.129032
+12      trace.to_adservice-0.error_rate                    90.0                     0.0                        NaT             0.000000    0.000000                 NaN
+13      trace.to_adservice-1.error_rate                    90.0                     0.0                        NaT             0.000000    0.000000                 NaN
+14      trace.to_adservice-2.error_rate                    90.0                     0.0                        NaT             0.000000    0.000000                 NaN
+15     trace.to_adservice2-0.error_rate                    30.0                     0.0                        NaT             0.000000    0.000000                 NaN
+--------------------------------------------------------------------------------
+2026-07-04 06:05:17,892 | DEBUG | Raw Response:
+{
+    "analysis": "Executor's last step scanned traces for names containing 'adservice' and found clear trace anomalies during the incident window: elevated latency (duration_mean and duration_p95) to adservice, with the highest severity on trace.to_adservice-1.duration_p95 (max_over_p95_ratio ≈ 6.33) and notable spikes on trace.to_adservice-0.duration_p95 (≈3.12). Metric analysis previously showed concentrated anomalies for the service-level 'adservice' (JVM/GC/memory KPIs) with a prominent spike in runtime.java_lang_Memory_ObjectPendingFinalizationCount (max_over_p95_ratio ≈ 7.27) and an earliest anomaly around 2022-03-21 03:44:00+08. Combining metrics and traces suggests adservice experienced JVM/GC/memory-related disturbance around ~03:44+08 that caused increased latency observed in traces. However, pod-level JVM metrics were not found (adservice metrics appear at service-level only), and we have not yet confirmed the exact root cause occurrence time or the concrete reason from logs. To finalize root cause localization (component / precise timestamp / reason) we must check logs and error_logs for adservice-related messages, JVM/GC/OutOfMemory indicators or other errors around the candidate timestamps (notably ~03:30–03:44+08).",
+    "completed": "False",
+    "instruction": "Search logs for evidence in the incident window 2022-03-21 03:30:00 to 2022-03-21 04:00:00 (UTC+8):\n1) From log.csv: filter rows where cmdb_id equals 'adservice' or starts with 'adservice' (include adservice2-0 if present) within the window. For each (cmdb_id, log_name) compute: total_rows_in_window, sum_value_in_window (sum of 'value'), earliest_timestamp_with_value_gt_0 (first timestamp where value>0, or null), max_value_in_window. Also provide up to the top 5 timestamps where value>0 for each group. Return up to 20 rows sorted by sum_value_in_window desc. Store full result in kernel variable.\n2) From error_logs.csv: filter rows within the same window and return top 20 distinct messages whose message text or cmdb_id contains any of these keywords (case-insensitive): 'adservice', 'OutOfMemory', 'OOM', 'GC', 'garbage', 'final', 'finalize', 'ObjectPendingFinalization', 'heap', 'memory', 'exception'. For each distinct message return: message_text (truncated if long), count, earliest_timestamp, and list of distinct cmdb_id values seen. Limit to top 20 messages sorted by count. Store the filtered error-log subset in a kernel variable for follow-up. Keep outputs compact."
+}
+2026-07-04 06:05:17,892 | INFO | --------------------------------------------------------------------------------
+### Step[6]
+Analysis: Executor's last step scanned traces for names containing 'adservice' and found clear trace anomalies during the incident window: elevated latency (duration_mean and duration_p95) to adservice, with the highest severity on trace.to_adservice-1.duration_p95 (max_over_p95_ratio ≈ 6.33) and notable spikes on trace.to_adservice-0.duration_p95 (≈3.12). Metric analysis previously showed concentrated anomalies for the service-level 'adservice' (JVM/GC/memory KPIs) with a prominent spike in runtime.java_lang_Memory_ObjectPendingFinalizationCount (max_over_p95_ratio ≈ 7.27) and an earliest anomaly around 2022-03-21 03:44:00+08. Combining metrics and traces suggests adservice experienced JVM/GC/memory-related disturbance around ~03:44+08 that caused increased latency observed in traces. However, pod-level JVM metrics were not found (adservice metrics appear at service-level only), and we have not yet confirmed the exact root cause occurrence time or the concrete reason from logs. To finalize root cause localization (component / precise timestamp / reason) we must check logs and error_logs for adservice-related messages, JVM/GC/OutOfMemory indicators or other errors around the candidate timestamps (notably ~03:30–03:44+08).
+Instruction: Search logs for evidence in the incident window 2022-03-21 03:30:00 to 2022-03-21 04:00:00 (UTC+8):
+1) From log.csv: filter rows where cmdb_id equals 'adservice' or starts with 'adservice' (include adservice2-0 if present) within the window. For each (cmdb_id, log_name) compute: total_rows_in_window, sum_value_in_window (sum of 'value'), earliest_timestamp_with_value_gt_0 (first timestamp where value>0, or null), max_value_in_window. Also provide up to the top 5 timestamps where value>0 for each group. Return up to 20 rows sorted by sum_value_in_window desc. Store full result in kernel variable.
+2) From error_logs.csv: filter rows within the same window and return top 20 distinct messages whose message text or cmdb_id contains any of these keywords (case-insensitive): 'adservice', 'OutOfMemory', 'OOM', 'GC', 'garbage', 'final', 'finalize', 'ObjectPendingFinalization', 'heap', 'memory', 'exception'. For each distinct message return: message_text (truncated if long), count, earliest_timestamp, and list of distinct cmdb_id values seen. Limit to top 20 messages sorted by count. Store the filtered error-log subset in a kernel variable for follow-up. Keep outputs compact.
+--------------------------------------------------------------------------------
+2026-07-04 06:05:17,892 | DEBUG | Start execution
+2026-07-04 06:05:37,328 | DEBUG | Raw Code:
+import pandas as pd
+import numpy as np
+import pytz
+
+# Reuse cached dataframes where available
+try:
+    log_df
+except NameError:
+    log_df = pd.read_csv('log.csv')
+try:
+    error_df
+except NameError:
+    error_df = pd.read_csv('error_logs.csv')
+
+# Ensure timezone per rule
+tz = pytz.timezone('Asia/Shanghai')
+
+# Ensure helper ts_to_dt exists or define it
+try:
+    ts_to_dt
+except NameError:
+    def ts_to_dt(ts):
+        return pd.to_datetime(int(ts), unit='s', utc=True).tz_convert(tz)
+
+# Ensure numeric 'value' in log_df
+log_df['value'] = pd.to_numeric(log_df['value'], errors='coerce')
+
+# Define incident window [2022-03-21 03:30:00, 2022-03-21 04:00:00) in UTC epoch seconds
+start_local = tz.localize(pd.Timestamp("2022-03-21 03:30:00"))
+end_local   = tz.localize(pd.Timestamp("2022-03-21 04:00:00"))
+start_ts = int(start_local.tz_convert(pytz.UTC).timestamp())
+end_ts   = int(end_local.tz_convert(pytz.UTC).timestamp())
+
+# PART 1: log.csv analysis for adservice* cmdb_id within window
+ad_mask = log_df['cmdb_id'].astype(str).str.startswith('adservice')
+window_mask = (log_df['timestamp'] >= start_ts) & (log_df['timestamp'] < end_ts)
+log_ad_window = log_df[ad_mask & window_mask].copy()
+
+# Group by (cmdb_id, log_name) and compute requested aggregations
+def log_group_agg(g):
+    total_rows = int(g.shape[0])
+    sum_value = float(g['value'].sum(skipna=True))
+    # earliest timestamp where value > 0
+    pos = g[g['value'] > 0]
+    if pos.shape[0] > 0:
+        earliest_pos_ts = int(pos['timestamp'].min())
+        earliest_pos_dt = ts_to_dt(earliest_pos_ts)
+        # up to top 5 timestamps where value>0 (sorted ascending)
+        top5_ts = pos['timestamp'].sort_values().head(5).apply(ts_to_dt).astype(str).tolist()
+    else:
+        earliest_pos_dt = None
+        top5_ts = []
+    max_value = float(g['value'].max()) if g['value'].notna().any() else np.nan
+    return pd.Series({
+        'total_rows_in_window': total_rows,
+        'sum_value_in_window': sum_value,
+        'earliest_timestamp_with_value_gt_0': earliest_pos_dt,
+        'max_value_in_window': max_value,
+        'top_positive_timestamps': top5_ts
+    })
+
+if log_ad_window.shape[0] > 0:
+    log_adservice_grouped_full = (
+        log_ad_window.groupby(['cmdb_id','log_name'], sort=False)
+        .apply(log_group_agg).reset_index()
+    )
+else:
+    log_adservice_grouped_full = pd.DataFrame(columns=[
+        'cmdb_id','log_name','total_rows_in_window','sum_value_in_window',
+        'earliest_timestamp_with_value_gt_0','max_value_in_window','top_positive_timestamps'
+    ])
+
+# Prepare compact display: convert top_positive_timestamps list to semicolon-joined short string
+log_adservice_grouped_full['top_positive_timestamps_str'] = log_adservice_grouped_full['top_positive_timestamps'].apply(
+    lambda lst: '; '.join(lst) if isinstance(lst, (list, np.ndarray)) and len(lst)>0 else ''
+)
+
+# Sort by sum_value_in_window desc and keep top 20
+log_adservice_top20 = log_adservice_grouped_full.sort_values(
+    'sum_value_in_window', ascending=False
+).reset_index(drop=True).head(20)
+
+# PART 2: error_logs.csv analysis within window and keyword filtering
+# Ensure message column exists
+if 'message' not in error_df.columns:
+    error_df['message'] = ''
+
+# Filter to incident window
+error_window = error_df[(error_df['timestamp'] >= start_ts) & (error_df['timestamp'] < end_ts)].copy()
+
+# Keywords (case-insensitive)
+keywords = [
+    'adservice','OutOfMemory','OOM','GC','garbage','final','finalize',
+    'ObjectPendingFinalization','heap','memory','exception'
+]
+# Build a single regex OR pattern, case-insensitive
+import re
+kw_pattern = '|'.join([re.escape(k) for k in keywords])
+mask_kw = (
+    error_window['message'].astype(str).str.contains(kw_pattern, case=False, regex=True) |
+    error_window['cmdb_id'].astype(str).str.contains(kw_pattern, case=False, regex=True)
+)
+error_kw_filtered = error_window[mask_kw].copy()
+
+# Store filtered subset for follow-up
+error_logs_filtered_window = error_kw_filtered.copy()
+
+# Group by distinct message text and aggregate count, earliest timestamp, distinct cmdb_ids
+def err_grp_agg(g):
+    cnt = int(g.shape[0])
+    earliest_ts = ts_to_dt(int(g['timestamp'].min())) if g.shape[0]>0 else None
+    cmdb_ids = sorted(g['cmdb_id'].dropna().unique().tolist())
+    return pd.Series({
+        'count': cnt,
+        'earliest_timestamp': earliest_ts,
+        'distinct_cmdb_ids': cmdb_ids
+    })
+
+if error_kw_filtered.shape[0] > 0:
+    error_messages_full = (
+        error_kw_filtered.groupby('message', sort=False).apply(err_grp_agg).reset_index()
+    )
+    # Truncate message text for compact display (e.g., first 200 chars)
+    error_messages_full['message_short'] = error_messages_full['message'].astype(str).str.slice(0,200)
+    # Sort by count desc and take top 20
+    error_messages_top20 = error_messages_full.sort_values('count', ascending=False).reset_index(drop=True).head(20)
+else:
+    error_messages_full = pd.DataFrame(columns=['message','count','earliest_timestamp','distinct_cmdb_ids','message_short'])
+    error_messages_top20 = error_messages_full.copy()
+
+# Final compact outputs (limited to 20 rows each where applicable)
+# 1) log results: select compact columns
+log_adservice_top20_display = log_adservice_top20[[
+    'cmdb_id','log_name','total_rows_in_window','sum_value_in_window',
+    'earliest_timestamp_with_value_gt_0','max_value_in_window','top_positive_timestamps_str'
+]]
+
+# 2) error messages top 20 compact display
+error_messages_top20_display = error_messages_top20[[
+    'message_short','count','earliest_timestamp','distinct_cmdb_ids'
+]]
+
+# Expose variables for follow-up: full grouped logs, top20 display, full filtered error logs, error messages full/top20
+log_adservice_grouped_full, log_adservice_top20_display, error_logs_filtered_window, error_messages_top20_display, error_messages_full.shape
+2026-07-04 06:05:37,393 | DEBUG | Execution Result:
+(       cmdb_id         log_name  total_rows_in_window  sum_value_in_window earliest_timestamp_with_value_gt_0  max_value_in_window                            top_positive_timestamps                        top_positive_timestamps_str
+0  adservice-0  log.error_count                    30                  0.0                                NaT                  0.0                                                 []                                                   
+1  adservice-0    log.row_count                    30              12458.0          2022-03-21 03:30:00+08:00                542.0  [2022-03-21 03:30:00+08:00, 2022-03-21 03:31:0...  2022-03-21 03:30:00+08:00; 2022-03-21 03:31:00...
+2  adservice-1  log.error_count                    30                  0.0                                NaT                  0.0                                                 []                                                   
+3  adservice-1    log.row_count                    30               1100.0          2022-03-21 03:30:00+08:00                 52.0  [2022-03-21 03:30:00+08:00, 2022-03-21 03:31:0...  2022-03-21 03:30:00+08:00; 2022-03-21 03:31:00...
+4  adservice-2  log.error_count                    30                  0.0                                NaT                  0.0                                                 []                                                   
+5  adservice-2    log.row_count                    30               1096.0          2022-03-21 03:30:00+08:00                 50.0  [2022-03-21 03:30:00+08:00, 2022-03-21 03:31:0...  2022-03-21 03:30:00+08:00; 2022-03-21 03:31:00...,        cmdb_id         log_name  total_rows_in_window  sum_value_in_window earliest_timestamp_with_value_gt_0  max_value_in_window                        top_positive_timestamps_str
+0  adservice-0    log.row_count                    30              12458.0          2022-03-21 03:30:00+08:00                542.0  2022-03-21 03:30:00+08:00; 2022-03-21 03:31:00...
+1  adservice-1    log.row_count                    30               1100.0          2022-03-21 03:30:00+08:00                 52.0  2022-03-21 03:30:00+08:00; 2022-03-21 03:31:00...
+2  adservice-2    log.row_count                    30               1096.0          2022-03-21 03:30:00+08:00                 50.0  2022-03-21 03:30:00+08:00; 2022-03-21 03:31:00...
+3  adservice-0  log.error_count                    30                  0.0                                NaT                  0.0                                                   
+4  adservice-1  log.error_count                    30                  0.0                                NaT                  0.0                                                   
+5  adservice-2  log.error_count                    30                  0.0                                NaT                  0.0                                                   , Empty DataFrame
+Columns: [timestamp, cmdb_id, message]
+Index: [], Empty DataFrame
+Columns: [message_short, count, earliest_timestamp, distinct_cmdb_ids]
+Index: [], (0, 5))
+2026-07-04 06:05:37,393 | DEBUG | Execution finished. Time cost: 0:00:19.500428
+2026-07-04 06:05:43,265 | DEBUG | Brief Answer:
+```python
+summary = (
+    "Log and error-log scan for adservice (window 2022-03-21 03:30–04:00 UTC+8):\n\n"
+    "1) log.csv (adservice*, per cmdb_id & log_name):\n"
+    "- adservice-0, log.row_count: total_rows=30, sum_value=12,458, earliest value>0=2022-03-21 03:30:00+08:00, "
+    "max_value_in_window=542. Top positive timestamps start at 03:30 and include many minutes thereafter.\n"
+    "- adservice-1, log.row_count: total_rows=30, sum_value=1,100, earliest value>0=2022-03-21 03:30:00+08:00, max=52.\n"
+    "- adservice-2, log.row_count: total_rows=30, sum_value=1,096, earliest value>0=2022-03-21 03:30:00+08:00, max=50.\n"
+    "- For all three pods, log.error_count is 0 across the window (no error_count entries > 0).\n\n"
+    "Interpretation: adservice-0 saw much higher request volume in-window (sum row_count >> adservice-1/2). This elevated traffic coincides with trace latency anomalies previously detected.\n\n"
+    "2) error_logs.csv (keyword search):\n"
+    "- No error-log messages matching the keywords (adservice, OOM, OutOfMemory, GC, final, heap, memory, exception, etc.) were found in the incident window (filtered subset is empty).\n\n"
+    "Recommended next steps:\n"
+    "- Correlate the high request volume on adservice-0 with the trace latency spikes (timestamps around 03:30–03:41 UTC+8) and the small metric P95 exceedances seen at the service level.\n"
+    "- Inspect application logs on adservice-0 around the earliest anomaly timestamps and check JVM/GC metrics at the service level (since pod-level JVM metrics were not found).\n"
+    "- Because error logs show no OOM/GC errors, focus first on load-induced latency (traffic surge) and subsequent short-lived resource spikes rather than explicit OOM faults.\n"
+)
+summary
+```
+2026-07-04 06:05:43,265 | INFO | --------------------------------------------------------------------------------
+Step[6]
+### Observation:
+```python
+summary = (
+    "Log and error-log scan for adservice (window 2022-03-21 03:30–04:00 UTC+8):\n\n"
+    "1) log.csv (adservice*, per cmdb_id & log_name):\n"
+    "- adservice-0, log.row_count: total_rows=30, sum_value=12,458, earliest value>0=2022-03-21 03:30:00+08:00, "
+    "max_value_in_window=542. Top positive timestamps start at 03:30 and include many minutes thereafter.\n"
+    "- adservice-1, log.row_count: total_rows=30, sum_value=1,100, earliest value>0=2022-03-21 03:30:00+08:00, max=52.\n"
+    "- adservice-2, log.row_count: total_rows=30, sum_value=1,096, earliest value>0=2022-03-21 03:30:00+08:00, max=50.\n"
+    "- For all three pods, log.error_count is 0 across the window (no error_count entries > 0).\n\n"
+    "Interpretation: adservice-0 saw much higher request volume in-window (sum row_count >> adservice-1/2). This elevated traffic coincides with trace latency anomalies previously detected.\n\n"
+    "2) error_logs.csv (keyword search):\n"
+    "- No error-log messages matching the keywords (adservice, OOM, OutOfMemory, GC, final, heap, memory, exception, etc.) were found in the incident window (filtered subset is empty).\n\n"
+    "Recommended next steps:\n"
+    "- Correlate the high request volume on adservice-0 with the trace latency spikes (timestamps around 03:30–03:41 UTC+8) and the small metric P95 exceedances seen at the service level.\n"
+    "- Inspect application logs on adservice-0 around the earliest anomaly timestamps and check JVM/GC metrics at the service level (since pod-level JVM metrics were not found).\n"
+    "- Because error logs show no OOM/GC errors, focus first on load-induced latency (traffic surge) and subsequent short-lived resource spikes rather than explicit OOM faults.\n"
+)
+summary
+```
+
+The original code execution output of IPython Kernel is also provided below for reference:
+
+(       cmdb_id         log_name  total_rows_in_window  sum_value_in_window earliest_timestamp_with_value_gt_0  max_value_in_window                            top_positive_timestamps                        top_positive_timestamps_str
+0  adservice-0  log.error_count                    30                  0.0                                NaT                  0.0                                                 []                                                   
+1  adservice-0    log.row_count                    30              12458.0          2022-03-21 03:30:00+08:00                542.0  [2022-03-21 03:30:00+08:00, 2022-03-21 03:31:0...  2022-03-21 03:30:00+08:00; 2022-03-21 03:31:00...
+2  adservice-1  log.error_count                    30                  0.0                                NaT                  0.0                                                 []                                                   
+3  adservice-1    log.row_count                    30               1100.0          2022-03-21 03:30:00+08:00                 52.0  [2022-03-21 03:30:00+08:00, 2022-03-21 03:31:0...  2022-03-21 03:30:00+08:00; 2022-03-21 03:31:00...
+4  adservice-2  log.error_count                    30                  0.0                                NaT                  0.0                                                 []                                                   
+5  adservice-2    log.row_count                    30               1096.0          2022-03-21 03:30:00+08:00                 50.0  [2022-03-21 03:30:00+08:00, 2022-03-21 03:31:0...  2022-03-21 03:30:00+08:00; 2022-03-21 03:31:00...,        cmdb_id         log_name  total_rows_in_window  sum_value_in_window earliest_timestamp_with_value_gt_0  max_value_in_window                        top_positive_timestamps_str
+0  adservice-0    log.row_count                    30              12458.0          2022-03-21 03:30:00+08:00                542.0  2022-03-21 03:30:00+08:00; 2022-03-21 03:31:00...
+1  adservice-1    log.row_count                    30               1100.0          2022-03-21 03:30:00+08:00                 52.0  2022-03-21 03:30:00+08:00; 2022-03-21 03:31:00...
+2  adservice-2    log.row_count                    30               1096.0          2022-03-21 03:30:00+08:00                 50.0  2022-03-21 03:30:00+08:00; 2022-03-21 03:31:00...
+3  adservice-0  log.error_count                    30                  0.0                                NaT                  0.0                                                   
+4  adservice-1  log.error_count                    30                  0.0                                NaT                  0.0                                                   
+5  adservice-2  log.error_count                    30                  0.0                                NaT                  0.0                                                   , Empty DataFrame
+Columns: [timestamp, cmdb_id, message]
+Index: [], Empty DataFrame
+Columns: [message_short, count, earliest_timestamp, distinct_cmdb_ids]
+Index: [], (0, 5))
+--------------------------------------------------------------------------------
+2026-07-04 06:06:05,180 | DEBUG | Raw Response:
+{
+    "analysis": "Executor has loaded all telemetry files, computed global P95s, and run anomaly detections. Findings so far: anomalies cluster on the adservice service-level metrics (JVM/GC/memory KPIs) with a prominent spike in runtime.java_lang_Memory_ObjectPendingFinalizationCount (max ≈7.27×P95) whose earliest anomalous point is 2022-03-21 03:44:00+08. Traces to adservice show large latency p95 spikes (e.g., trace.to_adservice-1.duration_p95 with max_over_p95_ratio ≈6.33) with earliest anomalous timestamps as early as 03:30+08. Application logs show adservice-0 had far higher request volume starting at 03:30+08 (log.row_count), while log.error_count is zero and error_logs contain no OOM/GC messages. Pod-level JVM/GC metrics were not found; JVM metrics appear at service-level only. From these results we can conclude the fault is localized to adservice (service-level) and relates to JVM/GC/memory behavior, but the exact root-cause occurrence time is still ambiguous because trace latency spikes appear earlier (03:30) while the strongest JVM metric spike is at 03:44. We need a final, objective earliest significant anomaly check using a stronger threshold (e.g., >150% of global P95) across service-level adservice metrics and traces to identify the first significant breach and finalize the root cause timestamp and reason.",
+    "completed": "False",
+    "instruction": "Using cached tables, find the earliest *significant* anomaly (value > 1.5 * global_P95) within the incident window 2022-03-21 03:30:00 to 2022-03-21 04:00:00 (UTC+8) from these two sources: \n1) service-level metrics where cmdb_id == 'adservice' (use global P95 per kpi computed from full series). For each (kpi_name) report: kpi_name, earliest_timestamp_in_window_where_value>1.5*P95, value_at_that_timestamp, global_p95, ratio=value/global_p95. \n2) traces where trace_name contains 'to_adservice' (use global P95 per trace_name computed from full series). For each trace_name report: trace_name, earliest_timestamp_in_window_where_value>1.5*P95, value_at_that_timestamp, global_p95, ratio=value/global_p95. \nReturn the top 20 rows combined (metrics and traces) sorted by earliest_timestamp ascending (earliest first). Store the full combined table in a kernel variable for follow-up. Limit displayed rows to 20 and keep outputs compact."
+}
+2026-07-04 06:06:05,181 | INFO | --------------------------------------------------------------------------------
+### Step[7]
+Analysis: Executor has loaded all telemetry files, computed global P95s, and run anomaly detections. Findings so far: anomalies cluster on the adservice service-level metrics (JVM/GC/memory KPIs) with a prominent spike in runtime.java_lang_Memory_ObjectPendingFinalizationCount (max ≈7.27×P95) whose earliest anomalous point is 2022-03-21 03:44:00+08. Traces to adservice show large latency p95 spikes (e.g., trace.to_adservice-1.duration_p95 with max_over_p95_ratio ≈6.33) with earliest anomalous timestamps as early as 03:30+08. Application logs show adservice-0 had far higher request volume starting at 03:30+08 (log.row_count), while log.error_count is zero and error_logs contain no OOM/GC messages. Pod-level JVM/GC metrics were not found; JVM metrics appear at service-level only. From these results we can conclude the fault is localized to adservice (service-level) and relates to JVM/GC/memory behavior, but the exact root-cause occurrence time is still ambiguous because trace latency spikes appear earlier (03:30) while the strongest JVM metric spike is at 03:44. We need a final, objective earliest significant anomaly check using a stronger threshold (e.g., >150% of global P95) across service-level adservice metrics and traces to identify the first significant breach and finalize the root cause timestamp and reason.
+Instruction: Using cached tables, find the earliest *significant* anomaly (value > 1.5 * global_P95) within the incident window 2022-03-21 03:30:00 to 2022-03-21 04:00:00 (UTC+8) from these two sources: 
+1) service-level metrics where cmdb_id == 'adservice' (use global P95 per kpi computed from full series). For each (kpi_name) report: kpi_name, earliest_timestamp_in_window_where_value>1.5*P95, value_at_that_timestamp, global_p95, ratio=value/global_p95. 
+2) traces where trace_name contains 'to_adservice' (use global P95 per trace_name computed from full series). For each trace_name report: trace_name, earliest_timestamp_in_window_where_value>1.5*P95, value_at_that_timestamp, global_p95, ratio=value/global_p95. 
+Return the top 20 rows combined (metrics and traces) sorted by earliest_timestamp ascending (earliest first). Store the full combined table in a kernel variable for follow-up. Limit displayed rows to 20 and keep outputs compact.
+--------------------------------------------------------------------------------
+2026-07-04 06:06:05,181 | DEBUG | Start execution
+2026-07-04 06:06:25,267 | DEBUG | Raw Code:
+import pandas as pd
+import numpy as np
+import pytz
+
+# Reuse cached variables where available
+try:
+    metric_df
+except NameError:
+    metric_df = pd.read_csv('metric.csv')
+try:
+    metric_grouped_full
+except NameError:
+    # compute global p95 per (cmdb_id,kpi_name) if missing
+    metric_df['value'] = pd.to_numeric(metric_df['value'], errors='coerce')
+    metric_grouped_full = metric_df.groupby(['cmdb_id','kpi_name'], sort=False).agg(
+        p95_value=('value', lambda s: float(s.quantile(0.95)) if s.notna().any() else np.nan)
+    ).reset_index()
+
+try:
+    trace_df
+except NameError:
+    trace_df = pd.read_csv('trace.csv')
+
+# timezone and helper
+tz = pytz.timezone('Asia/Shanghai')
+def ts_to_dt(ts):
+    return pd.to_datetime(int(ts), unit='s', utc=True).tz_convert(tz)
+
+# Incident window [inclusive start, exclusive end)
+start_local = tz.localize(pd.Timestamp("2022-03-21 03:30:00"))
+end_local   = tz.localize(pd.Timestamp("2022-03-21 04:00:00"))
+start_ts = int(start_local.tz_convert(pytz.UTC).timestamp())
+end_ts   = int(end_local.tz_convert(pytz.UTC).timestamp())
+
+# --- Part 1: service-level metrics where cmdb_id == 'adservice' ---
+# Find p95 column name in metric_grouped_full
+p95_col_candidates = [c for c in metric_grouped_full.columns if 'p95' in c.lower()]
+if len(p95_col_candidates) == 0:
+    raise RuntimeError("No p95 column found in metric_grouped_full")
+p95_col = p95_col_candidates[0]
+
+# Extract global p95 for cmdb_id == 'adservice'
+svc_p95 = metric_grouped_full[metric_grouped_full['cmdb_id'] == 'adservice'][['kpi_name', p95_col]].rename(columns={p95_col: 'global_p95'})
+
+# Filter metric points for service in window
+metric_df['value'] = pd.to_numeric(metric_df['value'], errors='coerce')
+svc_window = metric_df[
+    (metric_df['cmdb_id'] == 'adservice') &
+    (metric_df['timestamp'] >= start_ts) &
+    (metric_df['timestamp'] < end_ts)
+].copy()
+
+# Merge global p95 into windowed service metrics
+svc_window = svc_window.merge(svc_p95, on='kpi_name', how='left')
+
+# Significant condition: value > 1.5 * global_p95 and global_p95 finite and > 0
+svc_window['signif'] = svc_window['global_p95'].notna() & (svc_window['global_p95'] > 0) & (svc_window['value'] > 1.5 * svc_window['global_p95'])
+
+# For each kpi_name find earliest significant anomaly
+if svc_window['signif'].any():
+    svc_signif = svc_window[svc_window['signif']].copy()
+    svc_first_idx = svc_signif.groupby('kpi_name', sort=False)['timestamp'].idxmin()
+    svc_earliest = svc_signif.loc[svc_first_idx, ['kpi_name','timestamp','value','global_p95']].copy()
+    svc_earliest['earliest_timestamp'] = svc_earliest['timestamp'].apply(ts_to_dt)
+    svc_earliest['ratio'] = svc_earliest['value'] / svc_earliest['global_p95']
+    svc_earliest = svc_earliest[['kpi_name','earliest_timestamp','value','global_p95','ratio']].rename(
+        columns={'value':'value_at_timestamp'}
+    ).reset_index(drop=True)
+    svc_earliest['source'] = 'metric'
+    svc_earliest['cmdb_id'] = 'adservice'
+else:
+    svc_earliest = pd.DataFrame(columns=['kpi_name','earliest_timestamp','value_at_timestamp','global_p95','ratio','source','cmdb_id'])
+
+# --- Part 2: traces where trace_name contains 'to_adservice' ---
+trace_df['value'] = pd.to_numeric(trace_df['value'], errors='coerce')
+
+# compute global p95 per trace_name (full series)
+trace_p95 = trace_df.groupby('trace_name', sort=False)['value'].quantile(0.95).reset_index(name='global_p95')
+
+# filter trace points for names containing 'to_adservice' in the incident window
+mask_to_ad = trace_df['trace_name'].astype(str).str.contains('to_adservice', regex=False)
+trace_window = trace_df[mask_to_ad & (trace_df['timestamp'] >= start_ts) & (trace_df['timestamp'] < end_ts)].copy()
+
+# merge p95
+trace_window = trace_window.merge(trace_p95, on='trace_name', how='left')
+
+# significant condition > 1.5 * global_p95
+trace_window['signif'] = trace_window['global_p95'].notna() & (trace_window['global_p95'] > 0) & (trace_window['value'] > 1.5 * trace_window['global_p95'])
+
+# For each trace_name find earliest significant anomaly
+if trace_window['signif'].any():
+    trace_signif = trace_window[trace_window['signif']].copy()
+    trace_first_idx = trace_signif.groupby('trace_name', sort=False)['timestamp'].idxmin()
+    trace_earliest = trace_signif.loc[trace_first_idx, ['trace_name','timestamp','value','global_p95']].copy()
+    trace_earliest['earliest_timestamp'] = trace_earliest['timestamp'].apply(ts_to_dt)
+    trace_earliest['ratio'] = trace_earliest['value'] / trace_earliest['global_p95']
+    trace_earliest = trace_earliest[['trace_name','earliest_timestamp','value','global_p95','ratio']].rename(
+        columns={'value':'value_at_timestamp'}
+    ).reset_index(drop=True)
+    trace_earliest['source'] = 'trace'
+    trace_earliest['cmdb_id'] = None
+else:
+    trace_earliest = pd.DataFrame(columns=['trace_name','earliest_timestamp','value_at_timestamp','global_p95','ratio','source','cmdb_id'])
+
+# --- Combine results into a single compact table ---
+# Normalize column names: for metrics use 'name' column as kpi_name; for traces use trace_name
+svc_df = svc_earliest.copy()
+if not svc_df.empty:
+    svc_df = svc_df.rename(columns={'kpi_name':'name'})
+    svc_df = svc_df[['source','cmdb_id','name','earliest_timestamp','value_at_timestamp','global_p95','ratio']]
+
+trace_df_comb = trace_earliest.copy()
+if not trace_df_comb.empty:
+    trace_df_comb = trace_df_comb.rename(columns={'trace_name':'name'})
+    trace_df_comb = trace_df_comb[['source','cmdb_id','name','earliest_timestamp','value_at_timestamp','global_p95','ratio']]
+
+combined = pd.concat([svc_df, trace_df_comb], ignore_index=True, sort=False)
+
+# Sort by earliest timestamp ascending and keep top 20; store full combined table for follow-up
+earliest_significant_anomalies_full = combined.sort_values('earliest_timestamp', ascending=True).reset_index(drop=True)
+earliest_significant_anomalies_top20 = earliest_significant_anomalies_full.head(20)
+
+# Display compact top-20 (selected columns)
+earliest_significant_anomalies_top20[['source','cmdb_id','name','earliest_timestamp','value_at_timestamp','global_p95','ratio']], earliest_significant_anomalies_full.shape
+2026-07-04 06:06:25,325 | DEBUG | Execution Result:
+(   source    cmdb_id                                               name        earliest_timestamp  value_at_timestamp  global_p95     ratio
+0   trace       None                 trace.to_adservice-1.duration_mean 2022-03-21 03:30:00+08:00            0.000036    0.000015  2.474227
+1   trace       None                  trace.to_adservice-1.duration_p95 2022-03-21 03:30:00+08:00            0.000133    0.000021  6.333333
+2   trace       None                  trace.to_adservice-2.duration_p95 2022-03-21 03:35:00+08:00            0.000031    0.000021  1.508516
+3   trace       None                 trace.to_adservice-0.duration_mean 2022-03-21 03:41:00+08:00            0.000028    0.000019  1.509434
+4   trace       None                  trace.to_adservice-0.duration_p95 2022-03-21 03:41:00+08:00            0.000097    0.000031  3.118971
+5  metric  adservice  runtime.java_lang_Memory_ObjectPendingFinaliza... 2022-03-21 03:44:00+08:00            0.083333    0.045833  1.818182, (6, 7))
+2026-07-04 06:06:25,325 | DEBUG | Execution finished. Time cost: 0:00:20.143814
+2026-07-04 06:06:31,713 | DEBUG | Brief Answer:
+summary = (
+    "Earliest significant anomalies (>1.5×global P95) in the incident window (UTC+8):\n\n"
+    "1) Earliest and strongest traces (03:30:00+08:00):\n"
+    "   - trace.to_adservice-1.duration_mean — earliest at 2022-03-21 03:30:00, value ≈ 0.000036s, ratio ≈ 2.47×P95.\n"
+    "   - trace.to_adservice-1.duration_p95 — earliest at 2022-03-21 03:30:00, value ≈ 0.000133s, ratio ≈ 6.33×P95 (largest trace ratio).\n\n"
+    "2) Additional trace anomalies:\n"
+    "   - trace.to_adservice-2.duration_p95 at 03:35:00 (ratio ≈ 1.51×P95).\n"
+    "   - trace.to_adservice-0.duration_mean and duration_p95 at 03:41:00 (ratios ≈ 1.51× and 3.12×P95 respectively).\n\n"
+    "3) Service-level metric anomaly (later):\n"
+    "   - adservice runtime.java_lang_Memory_ObjectPendingFinalizationCount at 03:44:00 — value 0.0833, global P95 ≈ 0.0458, ratio ≈ 1.82×P95.\n\n"
+    "Summary conclusion and next steps:\n"
+    "- The earliest and most pronounced anomalies are trace latency spikes to adservice-1 at 03:30 (especially duration_p95).\n"
+    "- A notable JVM-related metric anomaly (ObjectPendingFinalizationCount) appears later at 03:44.\n"
+    "- Recommend: prioritize investigating the 03:30 trace latency spikes (correlate with request volume and upstream traces), then examine JVM/finalization behavior around 03:44 for potential side effects."
+)
+summary
+2026-07-04 06:06:31,714 | INFO | --------------------------------------------------------------------------------
+Step[7]
+### Observation:
+summary = (
+    "Earliest significant anomalies (>1.5×global P95) in the incident window (UTC+8):\n\n"
+    "1) Earliest and strongest traces (03:30:00+08:00):\n"
+    "   - trace.to_adservice-1.duration_mean — earliest at 2022-03-21 03:30:00, value ≈ 0.000036s, ratio ≈ 2.47×P95.\n"
+    "   - trace.to_adservice-1.duration_p95 — earliest at 2022-03-21 03:30:00, value ≈ 0.000133s, ratio ≈ 6.33×P95 (largest trace ratio).\n\n"
+    "2) Additional trace anomalies:\n"
+    "   - trace.to_adservice-2.duration_p95 at 03:35:00 (ratio ≈ 1.51×P95).\n"
+    "   - trace.to_adservice-0.duration_mean and duration_p95 at 03:41:00 (ratios ≈ 1.51× and 3.12×P95 respectively).\n\n"
+    "3) Service-level metric anomaly (later):\n"
+    "   - adservice runtime.java_lang_Memory_ObjectPendingFinalizationCount at 03:44:00 — value 0.0833, global P95 ≈ 0.0458, ratio ≈ 1.82×P95.\n\n"
+    "Summary conclusion and next steps:\n"
+    "- The earliest and most pronounced anomalies are trace latency spikes to adservice-1 at 03:30 (especially duration_p95).\n"
+    "- A notable JVM-related metric anomaly (ObjectPendingFinalizationCount) appears later at 03:44.\n"
+    "- Recommend: prioritize investigating the 03:30 trace latency spikes (correlate with request volume and upstream traces), then examine JVM/finalization behavior around 03:44 for potential side effects."
+)
+summary
+
+The original code execution output of IPython Kernel is also provided below for reference:
+
+(   source    cmdb_id                                               name        earliest_timestamp  value_at_timestamp  global_p95     ratio
+0   trace       None                 trace.to_adservice-1.duration_mean 2022-03-21 03:30:00+08:00            0.000036    0.000015  2.474227
+1   trace       None                  trace.to_adservice-1.duration_p95 2022-03-21 03:30:00+08:00            0.000133    0.000021  6.333333
+2   trace       None                  trace.to_adservice-2.duration_p95 2022-03-21 03:35:00+08:00            0.000031    0.000021  1.508516
+3   trace       None                 trace.to_adservice-0.duration_mean 2022-03-21 03:41:00+08:00            0.000028    0.000019  1.509434
+4   trace       None                  trace.to_adservice-0.duration_p95 2022-03-21 03:41:00+08:00            0.000097    0.000031  3.118971
+5  metric  adservice  runtime.java_lang_Memory_ObjectPendingFinaliza... 2022-03-21 03:44:00+08:00            0.083333    0.045833  1.818182, (6, 7))
+--------------------------------------------------------------------------------
+2026-07-04 06:06:45,255 | DEBUG | Raw Response:
+{
+    "analysis": "We followed the prescribed workflow using metric, trace, and log telemetry for the incident window 2022-03-21 03:30–04:00 (UTC+8). Steps taken and key findings:\n1) Preprocess & thresholds: global P95 thresholds were computed per (cmdb_id, KPI) across full series before any time filtering. Metric and trace series for the incident window were then evaluated against those global P95s.\n2) Metric anomaly detection: anomalies are concentrated at service-level cmdb_id == 'adservice'. Many JVM/GC and memory KPIs briefly exceed their global P95 (typically small spikes), with one notable service-level metric runtime.java_lang_Memory_ObjectPendingFinalizationCount showing a large spike (max_over_p95_ratio ≈ 7.27; earliest in-window anomalous time 2022-03-21 03:44:00+08). Pod-level JVM metrics weren’t present — JVM/GC KPIs are recorded only at service-level 'adservice' in these files.\n3) Trace analysis: traces to adservice show early and strong latency anomalies. The earliest significant trace anomaly is trace.to_adservice-1.duration_p95 at 2022-03-21 03:30:00+08 (value ≈ 0.000133s, ≈6.33×global P95). Other to_adservice latency anomalies occur at 03:30–03:41+08. Trace error rates were zero, but p95/micro-latency spikes are present.\n4) Log analysis: adservice-0 shows a much higher request volume (log.row_count) starting at 03:30+08; adservice pods' log.error_count is zero and error_logs contain no OOM/GC text in the window.\n5) Correlation & interpretation: traces indicate user-visible latency to adservice beginning at 03:30+08 (strongest on adservice-1 traces). Service-level JVM/memory metric spike (ObjectPendingFinalizationCount) occurs later at 03:44+08. The sequence suggests an initial load-induced latency spike at ~03:30 (higher traffic to adservice), followed by JVM/GC/finalization pressure manifested at 03:44+08. Because metrics indicate the faulty component at service level (adservice) and traces to adservice show early and pronounced latency anomalies, the most downstream faulty service in the call chain is adservice.\n6) Root-cause decision rationale per rules: only one service-level component (adservice) shows faults; trace analysis picks the most downstream faulty service. The earliest impactful anomaly in traces is at 2022-03-21 03:30:00+08, so that timestamp is the first observed fault manifestation. The underlying reason is consistent with JVM memory/GC pressure (elevated ObjectPendingFinalizationCount and other memory/GarbageCollector KPIs) likely induced or exacerbated by elevated request load (high row_count on adservice-0) which produced latency spikes and later JVM finalization backlog.\nFrom these combined observations we can localize the root cause to the adservice service, determine the approximate first occurrence time, and identify the likely root reason (JVM/container memory/GC pressure tied to elevated request load).",
+    "completed": "True",
+    "instruction": "Final concise diagnosis (summary):\nRoot cause component: adservice (service-level)\nRoot cause occurrence datetime (UTC+8): 2022-03-21 03:30:00+08:00 (earliest significant trace latency anomaly to adservice-1)\nRoot cause reason: adservice experienced load-induced JVM memory / garbage-collection pressure (container memory load and pending finalization). Evidence: early and large trace latency spikes to adservice (trace.to_adservice-1.duration_p95 at 03:30:00+08 with ≈6.33×global P95) combined with service-level JVM/memory metric anomalies (notably runtime.java_lang_Memory_ObjectPendingFinalizationCount spike at 03:44:00+08 with ≈1.82×P95) and high request volume on adservice-0 in logs beginning at 03:30+08. Recommended immediate actions: 1) investigate adservice JVM/heap settings and GC logs around 03:30–03:44+08, 2) check traffic routing/load balancing to adservice pods (adservice-0 had much higher row_count), 3) consider autoscaling or throttling mitigation and tune GC/heap to prevent pending-finalization buildup."
+}
+2026-07-04 06:06:45,255 | INFO | --------------------------------------------------------------------------------
+### Step[8]
+Analysis: We followed the prescribed workflow using metric, trace, and log telemetry for the incident window 2022-03-21 03:30–04:00 (UTC+8). Steps taken and key findings:
+1) Preprocess & thresholds: global P95 thresholds were computed per (cmdb_id, KPI) across full series before any time filtering. Metric and trace series for the incident window were then evaluated against those global P95s.
+2) Metric anomaly detection: anomalies are concentrated at service-level cmdb_id == 'adservice'. Many JVM/GC and memory KPIs briefly exceed their global P95 (typically small spikes), with one notable service-level metric runtime.java_lang_Memory_ObjectPendingFinalizationCount showing a large spike (max_over_p95_ratio ≈ 7.27; earliest in-window anomalous time 2022-03-21 03:44:00+08). Pod-level JVM metrics weren’t present — JVM/GC KPIs are recorded only at service-level 'adservice' in these files.
+3) Trace analysis: traces to adservice show early and strong latency anomalies. The earliest significant trace anomaly is trace.to_adservice-1.duration_p95 at 2022-03-21 03:30:00+08 (value ≈ 0.000133s, ≈6.33×global P95). Other to_adservice latency anomalies occur at 03:30–03:41+08. Trace error rates were zero, but p95/micro-latency spikes are present.
+4) Log analysis: adservice-0 shows a much higher request volume (log.row_count) starting at 03:30+08; adservice pods' log.error_count is zero and error_logs contain no OOM/GC text in the window.
+5) Correlation & interpretation: traces indicate user-visible latency to adservice beginning at 03:30+08 (strongest on adservice-1 traces). Service-level JVM/memory metric spike (ObjectPendingFinalizationCount) occurs later at 03:44+08. The sequence suggests an initial load-induced latency spike at ~03:30 (higher traffic to adservice), followed by JVM/GC/finalization pressure manifested at 03:44+08. Because metrics indicate the faulty component at service level (adservice) and traces to adservice show early and pronounced latency anomalies, the most downstream faulty service in the call chain is adservice.
+6) Root-cause decision rationale per rules: only one service-level component (adservice) shows faults; trace analysis picks the most downstream faulty service. The earliest impactful anomaly in traces is at 2022-03-21 03:30:00+08, so that timestamp is the first observed fault manifestation. The underlying reason is consistent with JVM memory/GC pressure (elevated ObjectPendingFinalizationCount and other memory/GarbageCollector KPIs) likely induced or exacerbated by elevated request load (high row_count on adservice-0) which produced latency spikes and later JVM finalization backlog.
+From these combined observations we can localize the root cause to the adservice service, determine the approximate first occurrence time, and identify the likely root reason (JVM/container memory/GC pressure tied to elevated request load).
+Instruction: Final concise diagnosis (summary):
+Root cause component: adservice (service-level)
+Root cause occurrence datetime (UTC+8): 2022-03-21 03:30:00+08:00 (earliest significant trace latency anomaly to adservice-1)
+Root cause reason: adservice experienced load-induced JVM memory / garbage-collection pressure (container memory load and pending finalization). Evidence: early and large trace latency spikes to adservice (trace.to_adservice-1.duration_p95 at 03:30:00+08 with ≈6.33×global P95) combined with service-level JVM/memory metric anomalies (notably runtime.java_lang_Memory_ObjectPendingFinalizationCount spike at 03:44:00+08 with ≈1.82×P95) and high request volume on adservice-0 in logs beginning at 03:30+08. Recommended immediate actions: 1) investigate adservice JVM/heap settings and GC logs around 03:30–03:44+08, 2) check traffic routing/load balancing to adservice pods (adservice-0 had much higher row_count), 3) consider autoscaling or throttling mitigation and tune GC/heap to prevent pending-finalization buildup.
+--------------------------------------------------------------------------------
+2026-07-04 06:06:51,463 | DEBUG | Raw Final Answer:
+```json
+{
+    "1": {
+        "root cause occurrence datetime": "2022-03-21 03:30:00",
+        "root cause component": "adservice",
+        "root cause reason": "container memory load"
+    }
+}
+```
+2026-07-04 06:06:51,464 | INFO | Result: {
+    "1": {
+        "root cause occurrence datetime": "2022-03-21 03:30:00",
+        "root cause component": "adservice",
+        "root cause reason": "container memory load"
+    }
+}
+2026-07-04 06:06:51,485 | INFO | Framework Answer: {
+    "1": {
+        "root cause occurrence datetime": "2022-03-21 03:30:00",
+        "root cause component": "adservice",
+        "root cause reason": "container memory load"
+    }
+}
+2026-07-04 06:06:51,485 | INFO | Prediction: {
+    "1": {
+        "root cause occurrence datetime": "2022-03-21 03:30:00",
+        "root cause component": "adservice",
+        "root cause reason": "container memory load"
+    }
+}
+2026-07-04 06:06:51,485 | INFO | Scoring Points: The only root cause occurrence time is within 1 minutes (i.e., <=1min) of 2022-03-21 03:53:45
+The only predicted root cause component is recommendationservice-1
+The only predicted root cause reason is container process termination
+
+2026-07-04 06:06:51,485 | INFO | Passed Criteria: []
+2026-07-04 06:06:51,485 | INFO | Failed Criteria: ['recommendationservice-1', 'container process termination', '2022-03-21 03:53:45']
+2026-07-04 06:06:51,486 | INFO | Score: 0.0
